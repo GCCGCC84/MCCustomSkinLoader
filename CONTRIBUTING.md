@@ -71,7 +71,7 @@ Before opening a pull request, run the relevant parts of this checklist:
 5. If you changed a version range or mapping entry, test the oldest and newest Minecraft versions covered by that range.
 6. Check `.minecraft/CustomSkinLoader/CustomSkinLoader.log` for loader, remapper, transformer, and skin loading errors.
 7. For skin API, cache, or network changes, test a normal online profile and a cache/local-profile fallback path when possible.
-8. For loader, mapping range, or multi-version changes, run the manual **Game Test** workflow and check its screenshots and per-version logs.
+8. For loader, mapping range, or multi-version changes, check the **Game Test** workflow run and its screenshots and per-version logs.
 
 There is currently no standalone test suite that replaces in-game compatibility testing. The **Game Test** workflow automates a large part of it: it resolves the loaders that exist for every `build.info.json` game version from PrismLauncher metadata, starts a vanilla server, launches a Mesa3D-software-rendered client for each loader, joins the server, and verifies that CustomSkinLoader applied a locally provided test skin. Use its `game_versions` and `loaders` inputs to run a focused subset.
 
@@ -93,7 +93,7 @@ Pull requests run the shared GitHub Actions build on `windows-latest` with Power
 
 Publishing jobs generate the Universal jar plus metadata files from `gradle.properties`. Beta builds publish moving beta metadata, release builds publish release metadata and upload to distribution platforms. Object-storage upload is optional and is skipped when the required secrets are not configured.
 
-The **Game Test** workflow (`.github/workflows/game-test.yml`) is triggered manually from the Actions tab. It builds the Universal jar, then runs one job per Minecraft version. Each job starts a vanilla server once and tests every loader available for that version in sequence. Version assets and libraries are cached per Minecraft version; results (screenshots, `latest.log`, `CustomSkinLoader.log`, client/server output and `result.json`) are uploaded as artifacts and summarized in the run's job summary.
+The **Game Test** workflow (`.github/workflows/game-test.yml`) runs on every push and pull request, and can also be dispatched manually. It builds the Universal jar, then runs one job per Minecraft version. Each job starts a vanilla server once and tests every loader available for that version in sequence. Version assets and libraries are cached per Minecraft version; results (screenshots, `latest.log`, `CustomSkinLoader.log`, client/server output and `result.json`) are uploaded as artifacts and summarized in the run's job summary. The manual `game_versions` and `loaders` inputs restrict a dispatch run to a focused subset.
 
 To generate publish metadata locally without uploading, first build the project, then run:
 

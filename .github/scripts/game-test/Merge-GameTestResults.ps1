@@ -58,8 +58,8 @@ $summary = @(
     '',
     "Passed: $passed, Failed: $failed, Total: $($rows.Count)",
     '',
-    '| Minecraft | Java | Loader | Loader version | Status | Joined | Skin log | Skin pixels | Duration | Error |',
-    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |'
+    '| Minecraft | Java | Loader | Loader version | Status | Joined | Skin log | Cape log | Skin pixels | Duration | Error |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |'
 )
 
 foreach ($row in $rows) {
@@ -69,7 +69,7 @@ foreach ($row in $rows) {
     if ($error.Length -gt 200) {
         $error = $error.Substring(0, 200) + '...'
     }
-    $summary += "| $($row.mc) | $($row.java) | $($row.loader) | $($row.loaderVersion) | $statusIcon | $($row.joined) | $($row.skinLogLoaded) | $($row.skinPixelsPassed) | $($row.durationSeconds)s | $error |"
+    $summary += "| $($row.mc) | $($row.java) | $($row.loader) | $($row.loaderVersion) | $statusIcon | $($row.joined) | $($row.skinLogLoaded) | $($row.capeLogLoaded) | $($row.skinPixelsPassed) | $($row.durationSeconds)s | $error |"
 }
 
 if ($rows.Count -eq 0) {

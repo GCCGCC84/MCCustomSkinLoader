@@ -1,12 +1,18 @@
 name: Game Test
 
-# Manual, full in-game compatibility test:
+# Full in-game compatibility test:
 # builds the Universal jar, then for every Minecraft version in build.info.json
 # starts a vanilla server and launches a real client (Mesa3D/llvmpipe) for each
 # mod loader available for that version, joins the server and verifies that
-# CustomSkinLoader applied a locally provided test skin.
+# CustomSkinLoader applied the local test skin and cape.
+#
+# Runs on every push and pull request. The optional workflow_dispatch inputs can
+# restrict the run to a subset of game versions or loaders.
 
 on:
+  push:
+  pull_request:
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
       game_versions:
@@ -20,7 +26,7 @@ on:
       max_parallel:
         description: 'Maximum number of parallel Minecraft version jobs'
         required: false
-        default: '8'
+        default: '32'
       skip_sound_assets:
         description: 'Skip downloading sound assets (smaller cache, no effect on visuals)'
         type: boolean
@@ -74,6 +80,23 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      - name: Prepare Mesa3D cache
+        id: mesa
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path '${{ runner.temp }}/mesa-cache' | Out-Null
+          Import-Module ./.github/scripts/game-test/lib/Mesa3D.psm1 -Force
+          Install-Mesa3D -CacheDir '${{ runner.temp }}/mesa-cache' -Destination '${{ runner.temp }}/mesa-deploy' | Out-Null
+
+      - name: Save Mesa3D cache
+        if: steps.mesa.outcome == 'success'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/mesa-cache
+          key: mesa3d-msvc-v1
+
   test:
     name: ${{ matrix.mc }}
     needs: [build, prepare]
@@ -82,7 +105,7 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJSON(github.event.inputs.max_parallel) }}
+      max-parallel: ${{ fromJSON(github.event.inputs.max_parallel || '8') }}
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v7
@@ -110,9 +133,7 @@ jobs:
 
       - name: Prepare cache directories
         shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path '${{ runner.temp }}/mc-cache/${{ matrix.mc }}' | Out-Null
-          New-Item -ItemType Directory -Force -Path '${{ runner.temp }}/mesa-cache' | Out-Null
+        run: New-Item -ItemType Directory -Force -Path '${{ runner.temp }}/mc-cache/${{ matrix.mc }}' | Out-Null
 
       - name: Restore version cache
         uses: actions/cache/restore@v4
@@ -133,10 +154,12 @@ jobs:
           JAVA_MAJOR: ${{ matrix.java }}
           LOADERS: ${{ matrix.loaders }}
           MOD_JAR: ${{ steps.modjar.outputs.path }}
-          JOIN_TIMEOUT: ${{ github.event.inputs.join_timeout }}
+          JOIN_TIMEOUT: ${{ github.event.inputs.join_timeout || '300' }}
+          SKIP_SOUND_ASSETS: ${{ github.event.inputs.skip_sound_assets }}
           MESA_CACHE: ${{ runner.temp }}/mesa-cache
         run: |
           $loaders = $env:LOADERS | ConvertFrom-Json
+          $skipSounds = $env:SKIP_SOUND_ASSETS -eq 'true'
           $failures = 0
           foreach ($loader in $loaders) {
             $resultDir = Join-Path 'test-results' $loader.name
@@ -152,7 +175,7 @@ jobs:
               -MesaCacheDir $env:MESA_CACHE `
               -ResultDir $resultDir `
               -JoinTimeoutSeconds ([int]$env:JOIN_TIMEOUT) `
-              -SkipSoundAssets:${{ github.event.inputs.skip_sound_assets }}
+              -SkipSoundAssets:$skipSounds
             if ($LASTEXITCODE -ne 0) {
               $failures++
               Write-Warning "$($loader.name) failed for Minecraft $env:MC_VERSION"
@@ -168,13 +191,6 @@ jobs:
         with:
           path: ${{ runner.temp }}/mc-cache/${{ matrix.mc }}
           key: game-test-${{ matrix.mc }}-v1
-
-      - name: Save Mesa3D cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ runner.temp }}/mesa-cache
-          key: mesa3d-msvc-v1
 
       - name: Upload results
         if: always()

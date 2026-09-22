@@ -43,6 +43,9 @@ namespace CslGameTest
         [DllImport("user32.dll")]
         public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
 
+        [DllImport("user32.dll")]
+        public static extern uint MapVirtualKey(uint code, uint mapType);
+
         [StructLayout(LayoutKind.Sequential)]
         public struct RECT
         {
@@ -169,11 +172,21 @@ function Send-GameKey {
     if (-not $script:VirtualKeys.ContainsKey($keyName)) {
         throw "Unsupported key '$Key'"
     }
-    $virtualKey = [IntPtr]$script:VirtualKeys[$keyName]
+    $virtualKey = [uint32]$script:VirtualKeys[$keyName]
 
-    [CslGameTest.Native]::PostMessage($Handle, $script:WmKeyDown, $virtualKey, [IntPtr]::Zero) | Out-Null
+    # lParam must carry repeat count 1 and the scan code: several input stacks
+    # (LWJGL included) resolve the pressed key from the scan code.
+    $scanCode = [int64][CslGameTest.Native]::MapVirtualKey($virtualKey, 0)
+    $downLParam = [IntPtr](1 -bor ($scanCode -shl 16))
+    $upLParam = [IntPtr](0xC0000001 -bor ($scanCode -shl 16))
+
+    # Send an extra key-up first: if a previous injected key-up was lost, the
+    # game would treat the key as still pressed and ignore the next key-down.
+    [CslGameTest.Native]::PostMessage($Handle, $script:WmKeyUp, [IntPtr]$virtualKey, $upLParam) | Out-Null
+    Start-Sleep -Milliseconds 100
+    [CslGameTest.Native]::PostMessage($Handle, $script:WmKeyDown, [IntPtr]$virtualKey, $downLParam) | Out-Null
     Start-Sleep -Milliseconds $HoldMilliseconds
-    [CslGameTest.Native]::PostMessage($Handle, $script:WmKeyUp, $virtualKey, [IntPtr]::Zero) | Out-Null
+    [CslGameTest.Native]::PostMessage($Handle, $script:WmKeyUp, [IntPtr]$virtualKey, $upLParam) | Out-Null
 }
 
 function Wait-MinecraftScreenshot {
@@ -274,13 +287,15 @@ function Test-SkinScreenshot {
         $yStart = [int]($bitmap.Height * 0.20)
         $yEnd = [int]($bitmap.Height * 0.85)
 
-        $magenta = 0
+        # The repository test skin is a green legacy skin. Count pixels where
+        # green clearly dominates red and blue; flat-world grass (G - R ~ 51)
+        # stays below the threshold.
+        $matched = 0
         for ($y = $yStart; $y -lt $yEnd; $y += $SampleStep) {
             for ($x = $xStart; $x -lt $xEnd; $x += $SampleStep) {
                 $color = $bitmap.GetPixel($x, $y)
-                if ($color.G -lt 110 -and $color.R -gt 130 -and $color.B -gt 130 -and
-                    [Math]::Abs($color.R - $color.B) -lt 80) {
-                    $magenta++
+                if ($color.G -ge 80 -and ($color.G - [Math]::Max($color.R, $color.B)) -ge 60) {
+                    $matched++
                 }
             }
         }
@@ -291,8 +306,8 @@ function Test-SkinScreenshot {
     return [pscustomobject]@{
         Width         = ($xEnd - $xStart)
         Height        = ($yEnd - $yStart)
-        MagentaPixels = $magenta
-        Pass          = ($magenta -ge $MinPixels)
+        MatchedPixels = $matched
+        Pass          = ($matched -ge $MinPixels)
     }
 }
 

@@ -9,6 +9,8 @@ param(
     [string]$Loader = 'vanilla',
     [string]$LoaderVersion,
     [Parameter(Mandatory)][string]$ModJar,
+    [string]$SkinPng,
+    [string]$CapePng,
     [Parameter(Mandatory)][string]$JavaHome,
     [string]$JavaMajor,
     [string]$WorkDir,
@@ -35,35 +37,12 @@ Import-Module (Join-Path $PSScriptRoot 'lib/MinecraftLauncher.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'lib/Mesa3D.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'lib/GameWindow.psm1') -Force
 
-function New-TestSkin {
-    param([Parameter(Mandatory)][string]$Path)
-
-    Add-Type -AssemblyName System.Drawing
-    $directory = Split-Path -Parent $Path
-    if ($directory) {
-        New-Item -ItemType Directory -Force -Path $directory | Out-Null
-    }
-
-    $bitmap = [System.Drawing.Bitmap]::new(64, 64)
-    try {
-        $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-        try {
-            # Pure magenta: easy to detect in a screenshot and never produced by
-            # the vanilla fallback skin.
-            $graphics.Clear([System.Drawing.Color]::FromArgb(255, 255, 0, 255))
-        } finally {
-            $graphics.Dispose()
-        }
-        $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
-    } finally {
-        $bitmap.Dispose()
-    }
-}
-
 function Write-CustomSkinLoaderConfig {
     param(
         [Parameter(Mandatory)][string]$Directory,
-        [Parameter(Mandatory)][string]$Username
+        [Parameter(Mandatory)][string]$Username,
+        [Parameter(Mandatory)][string]$SkinPng,
+        [Parameter(Mandatory)][string]$CapePng
     )
 
     New-Item -ItemType Directory -Force -Path $Directory | Out-Null
@@ -96,7 +75,12 @@ function Write-CustomSkinLoaderConfig {
     $config | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $Directory 'CustomSkinLoader.json') -Encoding utf8
 
     $skinPath = Join-Path $Directory "LocalSkin/skins/$Username.png"
-    New-TestSkin -Path $skinPath
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $skinPath) | Out-Null
+    Copy-Item -LiteralPath $SkinPng -Destination $skinPath -Force
+
+    $capePath = Join-Path $Directory "LocalSkin/capes/$Username.png"
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $capePath) | Out-Null
+    Copy-Item -LiteralPath $CapePng -Destination $capePath -Force
 }
 
 function Wait-ServerJoin {
@@ -144,6 +128,32 @@ function Wait-SkinProfileLoaded {
     return $false
 }
 
+function Get-MinecraftScreenshot {
+    param(
+        [Parameter(Mandatory)][IntPtr]$Handle,
+        [Parameter(Mandatory)][string]$Directory,
+        [string]$ViewKey,
+        [int]$TimeoutSeconds = 30
+    )
+
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        Set-GameWindowForeground -Handle $Handle
+        if ($ViewKey) {
+            Send-GameKey -Handle $Handle -Key $ViewKey
+            Start-Sleep -Seconds 4
+        }
+        $since = Get-Date
+        Send-GameKey -Handle $Handle -Key 'F2'
+        $attemptTimeout = [Math]::Max(8, [int][Math]::Ceiling($TimeoutSeconds / 3.0))
+        $screenshot = Wait-MinecraftScreenshot -Directory $Directory -Since $since -TimeoutSeconds $attemptTimeout
+        if ($screenshot) {
+            return $screenshot
+        }
+        Write-Warning "Screenshot attempt $attempt did not produce a file"
+    }
+    return $null
+}
+
 function Get-FileTail {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -163,7 +173,7 @@ function Copy-ResultArtifacts {
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][AllowNull()][object]$Server,
         [Parameter(Mandatory)][AllowNull()][object]$Client,
-        [AllowNull()][string]$Screenshot
+        [AllowNull()][string[]]$Screenshots = @()
     )
 
     $logDir = Join-Path $ResultDirectory 'logs'
@@ -190,10 +200,12 @@ function Copy-ResultArtifacts {
         }
     }
 
-    if ($Screenshot -and (Test-Path -LiteralPath $Screenshot)) {
-        $screenshotDir = Join-Path $ResultDirectory 'screenshots'
-        New-Item -ItemType Directory -Force -Path $screenshotDir | Out-Null
-        Copy-Item -LiteralPath $Screenshot -Destination (Join-Path $screenshotDir (Split-Path -Leaf $Screenshot)) -Force
+    foreach ($screenshotPath in @($Screenshots)) {
+        if ($screenshotPath -and (Test-Path -LiteralPath $screenshotPath)) {
+            $screenshotDir = Join-Path $ResultDirectory 'screenshots'
+            New-Item -ItemType Directory -Force -Path $screenshotDir | Out-Null
+            Copy-Item -LiteralPath $screenshotPath -Destination (Join-Path $screenshotDir (Split-Path -Leaf $screenshotPath)) -Force
+        }
     }
 }
 
@@ -216,6 +228,19 @@ $ResultDir = [System.IO.Path]::GetFullPath($ResultDir)
 $gameDir = Join-Path $WorkDir 'game'
 $serverDir = Join-Path $WorkDir 'server'
 
+if (-not $SkinPng) {
+    $SkinPng = Join-Path $PSScriptRoot 'assets/skin.png'
+}
+if (-not $CapePng) {
+    $CapePng = Join-Path $PSScriptRoot 'assets/cape.png'
+}
+if (-not (Test-Path -LiteralPath $SkinPng)) {
+    throw "Test skin was not found at '$SkinPng'"
+}
+if (-not (Test-Path -LiteralPath $CapePng)) {
+    throw "Test cape was not found at '$CapePng'"
+}
+
 $javaExe = Join-Path $JavaHome 'bin/java.exe'
 if (-not (Test-Path -LiteralPath $javaExe)) {
     throw "java.exe was not found under '$JavaHome'"
@@ -235,8 +260,10 @@ $result = [ordered]@{
     status           = 'failed'
     joined           = $false
     skinLogLoaded    = $false
+    capeLogLoaded    = $false
     skinPixelsPassed = $false
     screenshot       = $null
+    capeScreenshot   = $null
     durationSeconds  = 0
     error            = $null
 }
@@ -266,7 +293,8 @@ try {
     }
     New-Item -ItemType Directory -Force -Path (Join-Path $gameDir 'mods') | Out-Null
     Copy-Item -LiteralPath $ModJar -Destination (Join-Path $gameDir "mods/$(Split-Path -Leaf $ModJar)") -Force
-    Write-CustomSkinLoaderConfig -Directory (Join-Path $gameDir 'CustomSkinLoader') -Username $Username
+    Write-CustomSkinLoaderConfig -Directory (Join-Path $gameDir 'CustomSkinLoader') -Username $Username `
+        -SkinPng $SkinPng -CapePng $CapePng
 
     $server = & (Join-Path $PSScriptRoot 'Start-VanillaServer.ps1') -McVersion $McVersion -JavaExe $javaExe `
         -ServerDir $serverDir -CacheDir $CacheDir -Port $ServerPort -TimeoutSeconds $ServerTimeoutSeconds
@@ -288,28 +316,28 @@ try {
     Write-Output "Client joined the server."
 
     # Wait until CustomSkinLoader has applied a profile (and give the world a
-    # moment to render) before taking the screenshot.
+    # moment to render) before taking the screenshots.
     $cslLog = Join-Path $gameDir 'CustomSkinLoader/CustomSkinLoader.log'
     [void](Wait-SkinProfileLoaded -LogPath $cslLog -TimeoutSeconds 60)
     Start-Sleep -Seconds 3
 
     $processIds = Get-ProcessTreeId -RootId $client.Process.Id
     $windowHandle = Get-GameWindow -ProcessIds $processIds -TitleLike 'Minecraft' -TimeoutSeconds $WindowTimeoutSeconds
+    $screenshotsDir = Join-Path $gameDir 'screenshots'
+    $capeScreenshot = $null
 
-    $screenshotStart = Get-Date
     if ($windowHandle -ne [IntPtr]::Zero) {
-        Set-GameWindowForeground -Handle $windowHandle
-        Send-GameKey -Handle $windowHandle -Key 'F5'
-        Start-Sleep -Seconds 3
-        Send-GameKey -Handle $windowHandle -Key 'F5'
-        Start-Sleep -Seconds 4
-        Send-GameKey -Handle $windowHandle -Key 'F2'
+        # First F5 press: third person, camera behind the player (cape visible).
+        $capeScreenshot = Get-MinecraftScreenshot -Handle $windowHandle -Directory $screenshotsDir `
+            -ViewKey 'F5' -TimeoutSeconds $ScreenshotTimeoutSeconds
+
+        # Second F5 press: third person, camera in front of the player (skin visible).
+        $screenshot = Get-MinecraftScreenshot -Handle $windowHandle -Directory $screenshotsDir `
+            -ViewKey 'F5' -TimeoutSeconds $ScreenshotTimeoutSeconds
     } else {
         Write-Warning 'Minecraft window was not found; skipping key injection'
     }
 
-    $screenshotsDir = Join-Path $gameDir 'screenshots'
-    $screenshot = Wait-MinecraftScreenshot -Directory $screenshotsDir -Since $screenshotStart -TimeoutSeconds $ScreenshotTimeoutSeconds
     if (-not $screenshot -and $windowHandle -ne [IntPtr]::Zero) {
         Write-Warning 'F2 screenshot was not produced; falling back to a window capture'
         try {
@@ -324,7 +352,7 @@ try {
         try {
             $pixelResult = Test-SkinScreenshot -Path $screenshot
             $result.skinPixelsPassed = [bool]$pixelResult.Pass
-            Write-Output "Skin pixel check: $($pixelResult.MagentaPixels) magenta pixels (pass=$($pixelResult.Pass))"
+            Write-Output "Skin pixel check: $($pixelResult.MatchedPixels) matching pixels (pass=$($pixelResult.Pass))"
         } catch {
             Write-Warning "Skin pixel check failed: $_"
             if (-not $result.error) {
@@ -334,19 +362,25 @@ try {
     } else {
         Write-Warning 'No screenshot could be captured'
     }
+    if ($capeScreenshot) {
+        $result.capeScreenshot = $capeScreenshot
+    }
 
     if (Test-Path -LiteralPath $cslLog) {
         $cslContent = Get-Content -LiteralPath $cslLog -Raw
         $result.skinLogLoaded = ($cslContent -match "Try to load profile from 'LocalSkin'\.") -and
             ($cslContent -match "'s profile loaded\.")
+        $result.capeLogLoaded = $cslContent -match 'CapeUrl:\s*\(LOCAL_LEGACY\)'
         if (-not $result.skinLogLoaded) {
-            $result.error = "CustomSkinLoader.log does not report a loaded LocalSkin profile"
+            $result.error = 'CustomSkinLoader.log does not report a loaded LocalSkin profile'
+        } elseif (-not $result.capeLogLoaded) {
+            $result.error = 'CustomSkinLoader.log does not report a loaded local cape'
         }
     } else {
         $result.error = "CustomSkinLoader.log was not created at '$cslLog'"
     }
 
-    if ($result.joined -and $result.skinLogLoaded -and $result.skinPixelsPassed) {
+    if ($result.joined -and $result.skinLogLoaded -and $result.capeLogLoaded -and $result.skinPixelsPassed) {
         $result.status = 'passed'
     } elseif ($result.joined -and -not $result.skinPixelsPassed -and -not $result.error) {
         $result.error = 'Skin pixels were not detected in the screenshot'
@@ -384,7 +418,7 @@ try {
 
     try {
         Copy-ResultArtifacts -ResultDirectory $ResultDir -GameDir $gameDir -Root $WorkDir `
-            -Server $server -Client $client -Screenshot $screenshot
+            -Server $server -Client $client -Screenshots @($capeScreenshot, $screenshot)
     } catch {
         Write-Warning "Failed to copy result artifacts: $_"
     }
