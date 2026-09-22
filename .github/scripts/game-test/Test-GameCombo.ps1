@@ -291,8 +291,12 @@ try {
 
     $mesaEnvironment = @{}
     if (-not $SkipMesa) {
-        $mesa = Install-Mesa3D -CacheDir $MesaCacheDir -Destination $runtime.NativesDir
-        Write-Output "Mesa3D $($mesa.Version) deployed to $($runtime.NativesDir)"
+        # LWJGL 2 loads opengl32.dll with the Win32 LoadLibrary search order,
+        # where the executable directory beats PATH. Deploy Mesa next to
+        # java.exe as well so the software renderer is actually picked up.
+        $mesa = Install-Mesa3D -CacheDir $MesaCacheDir -Destination $runtime.NativesDir `
+            -AdditionalDestination (Split-Path -Parent $javaExe)
+        Write-Output "Mesa3D $($mesa.Version) deployed to $($runtime.NativesDir) and $((Split-Path -Parent $javaExe))"
         $mesaEnvironment = Get-MesaEnvironment -MesaRoot $mesa.Root
     }
 

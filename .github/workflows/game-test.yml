@@ -1,9 +1,10 @@
 name: Game Test
 
 # Full in-game compatibility test:
-# builds the Universal jar, then for every Minecraft version in build.info.json
-# starts a vanilla server and launches a real client (Mesa3D/llvmpipe) for each
-# mod loader available for that version, joins the server and verifies that
+# builds the Universal jar, prepares one shared download cache per Minecraft
+# version era, then for every Minecraft version in build.info.json starts a
+# vanilla server and launches a real client (Mesa3D/llvmpipe) for each mod
+# loader available for that version, joins the server and verifies that
 # CustomSkinLoader applied the local test skin and cape.
 #
 # Runs on every push and pull request. The optional workflow_dispatch inputs can
@@ -26,15 +27,15 @@ on:
       max_parallel:
         description: 'Maximum number of parallel Minecraft version jobs'
         required: false
-        default: '32'
+        default: '8'
       skip_sound_assets:
-        description: 'Skip downloading sound assets (smaller cache, no effect on visuals)'
+        description: 'Skip downloading sound assets (smaller caches, no effect on visuals)'
         type: boolean
         default: false
       join_timeout:
         description: 'Seconds to wait for the client to join the server'
         required: false
-        default: '900'
+        default: '300'
 
 concurrency:
   group: game-test-${{ github.ref }}
@@ -60,17 +61,48 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       count: ${{ steps.matrix.outputs.count }}
+      cache_matrix: ${{ steps.matrix.outputs.cache_matrix }}
+      cache_count: ${{ steps.matrix.outputs.cache_count }}
     steps:
       - uses: actions/checkout@v7
 
       - name: Build test matrix
         id: matrix
         shell: pwsh
+        env:
+          SKIP_SOUND_ASSETS: ${{ github.event.inputs.skip_sound_assets }}
         run: |
+          $skipSounds = $env:SKIP_SOUND_ASSETS -eq 'true'
           ./.github/scripts/game-test/Get-GameTestMatrix.ps1 `
             -GameVersions '${{ github.event.inputs.game_versions }}' `
             -Loaders '${{ github.event.inputs.loaders }}' `
-            -CacheDir '${{ runner.temp }}/csl-matrix-cache'
+            -CacheDir '${{ runner.temp }}/csl-matrix-cache' `
+            -SkipSoundAssets:$skipSounds
+
+      - name: Prepare cache directories
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path '${{ runner.temp }}/mesa-cache' | Out-Null
+
+      - name: Restore Mesa3D cache
+        id: mesa-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/mesa-cache
+          key: mesa3d-msvc-26.2.0
+
+      - name: Download Mesa3D
+        if: steps.mesa-restore.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          Import-Module ./.github/scripts/game-test/lib/Mesa3D.psm1 -Force
+          Install-Mesa3D -CacheDir '${{ runner.temp }}/mesa-cache' -Destination '${{ runner.temp }}/mesa-deploy' | Out-Null
+
+      - name: Save Mesa3D cache
+        if: steps.mesa-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/mesa-cache
+          key: mesa3d-msvc-26.2.0
 
       - name: Upload matrix
         uses: actions/upload-artifact@v7
@@ -80,32 +112,62 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Prepare Mesa3D cache
-        id: mesa
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path '${{ runner.temp }}/mesa-cache' | Out-Null
-          Import-Module ./.github/scripts/game-test/lib/Mesa3D.psm1 -Force
-          Install-Mesa3D -CacheDir '${{ runner.temp }}/mesa-cache' -Destination '${{ runner.temp }}/mesa-deploy' | Out-Null
+  prepare-cache:
+    name: Cache ${{ matrix.group }}
+    needs: [prepare]
+    if: needs.prepare.outputs.cache_count != '0'
+    runs-on: windows-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.prepare.outputs.cache_matrix) }}
+    steps:
+      - uses: actions/checkout@v7
 
-      - name: Save Mesa3D cache
-        if: steps.mesa.outcome == 'success'
-        continue-on-error: true
+      - name: Prepare cache directory
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path '${{ runner.temp }}/shared-cache' | Out-Null
+
+      - name: Restore shared cache
+        id: shared-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/shared-cache
+          key: ${{ matrix.key }}
+
+      - name: Prepare shared cache
+        if: steps.shared-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        env:
+          SKIP_SOUND_ASSETS: ${{ github.event.inputs.skip_sound_assets }}
+          CACHE_ENTRIES: ${{ matrix.entries }}
+        run: |
+          $skipSounds = $env:SKIP_SOUND_ASSETS -eq 'true'
+          ./.github/scripts/game-test/Initialize-GameTestCache.ps1 `
+            -Entries $env:CACHE_ENTRIES `
+            -CacheDir "$env:RUNNER_TEMP/shared-cache" `
+            -WorkDir "$env:RUNNER_TEMP/cache-work" `
+            -SkipSoundAssets:$skipSounds `
+            -MaxParallel 3 `
+            -ThrottleLimit 12
+
+      - name: Save shared cache
+        if: steps.shared-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          path: ${{ runner.temp }}/mesa-cache
-          key: mesa3d-msvc-v1
+          path: ${{ runner.temp }}/shared-cache
+          key: ${{ matrix.key }}
 
   test:
     name: ${{ matrix.mc }}
-    needs: [build, prepare]
+    needs: [build, prepare, prepare-cache]
     if: needs.prepare.outputs.count != '0'
     runs-on: windows-latest
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJSON(github.event.inputs.max_parallel || '32') }}
+      max-parallel: ${{ fromJSON(github.event.inputs.max_parallel || '8') }}
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v7
@@ -131,21 +193,17 @@ jobs:
           if (-not $jar) { throw 'No mod jar found in the build artifact' }
           "path=$($jar.FullName)" >> $env:GITHUB_OUTPUT
 
-      - name: Prepare cache directories
-        shell: pwsh
-        run: New-Item -ItemType Directory -Force -Path '${{ runner.temp }}/mc-cache/${{ matrix.mc }}' | Out-Null
-
-      - name: Restore version cache
+      - name: Restore shared cache
         uses: actions/cache/restore@v4
         with:
-          path: ${{ runner.temp }}/mc-cache/${{ matrix.mc }}
-          key: game-test-${{ matrix.mc }}-v1
+          path: ${{ runner.temp }}/shared-cache
+          key: ${{ matrix.cacheKey }}
 
       - name: Restore Mesa3D cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/mesa-cache
-          key: mesa3d-msvc-v1
+          key: mesa3d-msvc-26.2.0
 
       - name: Run game tests
         shell: pwsh
@@ -171,7 +229,7 @@ jobs:
               -JavaHome $env:JAVA_HOME `
               -JavaMajor $env:JAVA_MAJOR `
               -WorkDir "$env:RUNNER_TEMP/game-test/$env:MC_VERSION/$($loader.name)" `
-              -CacheDir "$env:RUNNER_TEMP/mc-cache/$env:MC_VERSION" `
+              -CacheDir "$env:RUNNER_TEMP/shared-cache" `
               -MesaCacheDir $env:MESA_CACHE `
               -ResultDir $resultDir `
               -JoinTimeoutSeconds ([int]$env:JOIN_TIMEOUT) `
@@ -184,13 +242,6 @@ jobs:
           if ($failures -gt 0) {
             throw "$failures loader(s) failed for Minecraft $env:MC_VERSION"
           }
-
-      - name: Save version cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ runner.temp }}/mc-cache/${{ matrix.mc }}
-          key: game-test-${{ matrix.mc }}-v1
 
       - name: Upload results
         if: always()

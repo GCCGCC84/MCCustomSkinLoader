@@ -3,6 +3,11 @@
 Set-StrictMode -Version 1.0
 $ErrorActionPreference = 'Stop'
 
+# Pinned Mesa3D release. Bump this together with the mesa cache key in
+# .github/workflows/game-test.yml. The GitHub API is intentionally avoided:
+# hosted runner IPs share a low unauthenticated rate limit.
+$script:DefaultMesaVersion = '26.2.0'
+
 function Get-SevenZipPath {
     $command = Get-Command 7z.exe -ErrorAction SilentlyContinue
     if ($command) {
@@ -27,7 +32,7 @@ function Get-LatestMesaVersion {
         $headers['Authorization'] = "Bearer $env:GITHUB_TOKEN"
     }
     $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/pal1000/mesa-dist-win/releases/latest' `
-        -Headers $headers -TimeoutSec 60
+        -Headers $headers -TimeoutSec 10
     return [string]$release.tag_name
 }
 
@@ -35,14 +40,18 @@ function Install-Mesa3D {
     param(
         [Parameter(Mandatory)][string]$CacheDir,
         [Parameter(Mandatory)][string]$Destination,
+        [string[]]$AdditionalDestination = @(),
         [string]$Version
     )
 
     New-Item -ItemType Directory -Force -Path $CacheDir, $Destination | Out-Null
+    foreach ($extra in $AdditionalDestination) {
+        New-Item -ItemType Directory -Force -Path $extra | Out-Null
+    }
 
     $tag = $Version
     if (-not $tag) {
-        $tag = Get-LatestMesaVersion
+        $tag = $script:DefaultMesaVersion
     }
 
     $extractDir = Join-Path $CacheDir "mesa3d-$tag"
@@ -56,14 +65,14 @@ function Install-Mesa3D {
             $url = "https://github.com/pal1000/mesa-dist-win/releases/download/$tag/$archiveName"
             Write-Host "Downloading Mesa3D $tag ..."
             $downloaded = $false
-            for ($attempt = 1; $attempt -le 4 -and -not $downloaded; $attempt++) {
+            for ($attempt = 1; $attempt -le 8 -and -not $downloaded; $attempt++) {
                 try {
-                    Invoke-WebRequest -Uri $url -OutFile "$archive.part" -TimeoutSec 900 -HttpVersion 1.1 | Out-Null
+                    Invoke-WebRequest -Uri $url -OutFile "$archive.part" -TimeoutSec 10 -HttpVersion 1.1 | Out-Null
                     Move-Item -LiteralPath "$archive.part" -Destination $archive -Force
                     $downloaded = $true
                 } catch {
                     Remove-Item -LiteralPath "$archive.part" -Force -ErrorAction SilentlyContinue
-                    if ($attempt -eq 4) {
+                    if ($attempt -eq 8) {
                         throw "Failed to download Mesa3D from '$url': $_"
                     }
                     Start-Sleep -Seconds (2 * $attempt)
@@ -88,12 +97,16 @@ function Install-Mesa3D {
         $source = Join-Path $x64Dir $dll
         if (Test-Path -LiteralPath $source) {
             Copy-Item -LiteralPath $source -Destination (Join-Path $Destination $dll) -Force
+            foreach ($extra in $AdditionalDestination) {
+                Copy-Item -LiteralPath $source -Destination (Join-Path $extra $dll) -Force
+            }
         }
     }
 
     return [pscustomobject]@{
         Version = $tag
         Root    = $x64Dir
+        DeployedDlls = @(Get-ChildItem -LiteralPath $x64Dir -Filter '*.dll' | ForEach-Object { $_.Name })
     }
 }
 

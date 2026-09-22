@@ -242,52 +242,67 @@ function Invoke-McFileDownload {
         return @()
     }
 
-    $failed = @($pending | ForEach-Object -Parallel {
-            $item = $_
-            $ProgressPreference = 'SilentlyContinue'
-            $destination = $item.Path
+    $total = $pending.Count
+    $failed = @()
+    $batchSize = [Math]::Max($ThrottleLimit * 4, 32)
 
-            try {
-                if (Test-Path -LiteralPath $destination) {
-                    $existing = Get-Item -LiteralPath $destination
-                    if ($null -eq $item.Size -or $existing.Length -eq $item.Size) {
-                        return $null
-                    }
-                }
-            } catch {
-                # Fall through to a fresh download when the existing file is unusable.
-            }
+    for ($offset = 0; $offset -lt $total; $offset += $batchSize) {
+        $last = [Math]::Min($offset + $batchSize - 1, $total - 1)
+        $batch = @($pending[$offset..$last])
 
-            $directory = Split-Path -Parent $destination
-            if ($directory) {
-                New-Item -ItemType Directory -Force -Path $directory | Out-Null
-            }
+        $batchResults = @($batch | ForEach-Object -Parallel {
+                $item = $_
+                $ProgressPreference = 'SilentlyContinue'
+                $destination = $item.Path
 
-            $temporary = "$destination.part"
-            for ($attempt = 1; $attempt -le $using:Retries; $attempt++) {
                 try {
-                    Invoke-WebRequest -Uri $item.Url -OutFile $temporary -TimeoutSec 600 -HttpVersion 1.1 |
-                        Out-Null
-
-                    if ($item.Sha1) {
-                        $actual = (Get-FileHash -LiteralPath $temporary -Algorithm SHA1).Hash.ToLowerInvariant()
-                        if ($actual -ne ([string]$item.Sha1).ToLowerInvariant()) {
-                            throw "SHA1 mismatch (expected $($item.Sha1), got $actual)"
+                    if (Test-Path -LiteralPath $destination) {
+                        $existing = Get-Item -LiteralPath $destination
+                        if ($null -eq $item.Size -or $existing.Length -eq $item.Size) {
+                            return $null
                         }
                     }
-
-                    Move-Item -LiteralPath $temporary -Destination $destination -Force
-                    return $null
                 } catch {
-                    Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
-                    if ($attempt -eq $using:Retries) {
-                        return [pscustomobject]@{ Url = $item.Url; Path = $destination; Error = "$_" }
-                    }
-                    Start-Sleep -Seconds (3 * $attempt)
+                    # Fall through to a fresh download when the existing file is unusable.
                 }
-            }
-            return $null
-        } -ThrottleLimit $ThrottleLimit)
+
+                $directory = Split-Path -Parent $destination
+                if ($directory) {
+                    New-Item -ItemType Directory -Force -Path $directory | Out-Null
+                }
+
+                # Unique temporary name so parallel workers cannot corrupt each
+                # other's partial downloads when the same file is requested twice.
+                $temporary = "$destination.$([guid]::NewGuid().ToString('N')).part"
+                for ($attempt = 1; $attempt -le $using:Retries; $attempt++) {
+                    try {
+                        Invoke-WebRequest -Uri $item.Url -OutFile $temporary -TimeoutSec 10 -HttpVersion 1.1 |
+                            Out-Null
+
+                        if ($item.Sha1) {
+                            $actual = (Get-FileHash -LiteralPath $temporary -Algorithm SHA1).Hash.ToLowerInvariant()
+                            if ($actual -ne ([string]$item.Sha1).ToLowerInvariant()) {
+                                throw "SHA1 mismatch (expected $($item.Sha1), got $actual)"
+                            }
+                        }
+
+                        Move-Item -LiteralPath $temporary -Destination $destination -Force
+                        return $null
+                    } catch {
+                        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+                        if ($attempt -eq $using:Retries) {
+                            return [pscustomobject]@{ Url = $item.Url; Path = $destination; Error = "$_" }
+                        }
+                        Start-Sleep -Seconds (2 * $attempt)
+                    }
+                }
+                return $null
+            } -ThrottleLimit $ThrottleLimit)
+
+        $failed += @($batchResults | Where-Object { $null -ne $_ })
+        $processed = [Math]::Min($offset + $batchSize, $total)
+        Write-Host "  processed $processed/$total files ($($failed.Count) failed)"
+    }
 
     $failed = @($failed | Where-Object { $null -ne $_ })
     if ($failed.Count -gt 0) {

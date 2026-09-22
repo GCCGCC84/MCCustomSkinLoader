@@ -27,7 +27,7 @@ function Invoke-MetaRequest {
     param(
         [Parameter(Mandatory)][string]$Uri,
         [int]$Retries = 6,
-        [int]$TimeoutSec = 60
+        [int]$TimeoutSec = 10
     )
 
     $lastError = $null

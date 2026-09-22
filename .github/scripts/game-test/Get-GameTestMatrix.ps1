@@ -12,6 +12,7 @@ param(
     [string]$CacheDir,
     [string]$OutputFile,
     [string]$SummaryFile,
+    [switch]$SkipSoundAssets,
     [switch]$Pretty
 )
 
@@ -22,6 +23,31 @@ Import-Module (Join-Path $PSScriptRoot 'lib/MetaLauncher.psm1') -Force
 
 $script:QuiltSupportedGameVersions = $null
 $script:QuiltSupportedGameVersionsLoaded = $false
+
+function Get-VersionSortKey {
+    param([Parameter(Mandatory)][string]$Version)
+
+    $parts = @($Version -split '[.\-]')
+    $key = [int64]0
+    for ($i = 0; $i -lt 3; $i++) {
+        $number = 0
+        if ($i -lt $parts.Count) {
+            [void][int]::TryParse($parts[$i], [ref]$number)
+        }
+        $key = $key * 10000 + $number
+    }
+    return $key
+}
+
+function Get-CacheGroup {
+    param([Parameter(Mandatory)][string]$McVersion)
+
+    $key = Get-VersionSortKey -Version $McVersion
+    if ($key -le (Get-VersionSortKey -Version '1.12.2')) { return 'legacy' }
+    if ($key -le (Get-VersionSortKey -Version '1.16.5')) { return 'middle' }
+    if ($key -le (Get-VersionSortKey -Version '1.20.6')) { return 'modern' }
+    return 'new'
+}
 
 function Get-JavaMajor {
     param(
@@ -126,6 +152,12 @@ if ($Loaders) {
 $include = @()
 $summaryLines = @()
 $skippedVersions = @()
+$groupEntries = [ordered]@{
+    legacy = @()
+    middle = @()
+    modern = @()
+    new    = @()
+}
 
 foreach ($mcVersion in $allVersions) {
     $javaMajor = Get-JavaMajor -McVersion $mcVersion -CacheDir $CacheDir
@@ -148,20 +180,70 @@ foreach ($mcVersion in $allVersions) {
         continue
     }
 
+    $group = Get-CacheGroup -McVersion $mcVersion
     $loaderJson = ConvertTo-Json -InputObject @($loaderEntries) -Compress -Depth 5
     $include += [ordered]@{
+        mc         = $mcVersion
+        java       = "$javaMajor"
+        loaders    = $loaderJson
+        cacheGroup = $group
+    }
+    $groupEntries[$group] += [ordered]@{
         mc      = $mcVersion
-        java    = "$javaMajor"
         loaders = $loaderJson
     }
+
     $loaderText = ($loaderEntries | ForEach-Object { "$($_.name) $($_.version)" }) -join ', '
     $summaryLines += "| $mcVersion | $javaMajor | $loaderText |"
 }
 
+# A shared download cache is prepared once per version era in the Prepare stage
+# so test jobs restore a read-only cache instead of writing per-version caches.
+# The key pins the exact matrix content (Minecraft + loader versions) and the
+# sound asset setting, so a changed matrix produces a fresh cache.
+$cacheInclude = @()
+$keyByGroup = @{}
+$groupSummary = @()
+foreach ($group in @('legacy', 'middle', 'modern', 'new')) {
+    $entries = @($groupEntries[$group])
+    if ($entries.Count -eq 0) {
+        continue
+    }
+
+    $payload = [ordered]@{
+        schema     = 1
+        skipSounds = [bool]$SkipSoundAssets
+        entries    = $entries
+    }
+    $payloadJson = ConvertTo-Json -InputObject $payload -Compress -Depth 10
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hashBytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($payloadJson))
+    } finally {
+        $sha.Dispose()
+    }
+    $hash = ([System.BitConverter]::ToString($hashBytes) -replace '-', '').Substring(0, 12).ToLowerInvariant()
+    $key = "mc-shared-$group-win-$hash-v1"
+
+    $cacheInclude += [ordered]@{
+        group   = $group
+        key     = $key
+        entries = (ConvertTo-Json -InputObject @($entries) -Compress -Depth 10)
+    }
+    $keyByGroup[$group] = $key
+    $groupSummary += "- $group : $($entries.Count) version(s), cache key ``$key``"
+}
+
+foreach ($entry in $include) {
+    $entry['cacheKey'] = $keyByGroup[$entry['cacheGroup']]
+}
+
 $matrix = [ordered]@{ include = $include }
 $matrixJson = ConvertTo-Json -InputObject $matrix -Compress -Depth 10
+$cacheMatrixJson = ConvertTo-Json -InputObject ([ordered]@{ include = $cacheInclude }) -Compress -Depth 10
 
 Write-Host "Prepared $($include.Count) Minecraft version job(s); $($skippedVersions.Count) version(s) had no supported loader."
+$groupSummary | ForEach-Object { Write-Host $_ }
 
 if ($OutputFile) {
     $matrixJson | Set-Content -LiteralPath $OutputFile -Encoding utf8
@@ -171,6 +253,10 @@ $summary = @(
     '## Game test matrix',
     '',
     "Versions: $($include.Count), skipped (no loader): $($skippedVersions.Count)",
+    '',
+    '### Shared cache groups',
+    ''
+) + $groupSummary + @(
     '',
     '| Minecraft | Java | Loaders |',
     '| --- | --- | --- |'
@@ -187,6 +273,11 @@ if ($env:GITHUB_OUTPUT) {
     "count=$($include.Count)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
     "matrix<<EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
     $matrixJson | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+    "EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+    "cache_count=$($cacheInclude.Count)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+    "cache_matrix<<EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+    $cacheMatrixJson | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
     "EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 }
 
