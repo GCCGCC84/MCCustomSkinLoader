@@ -1,8 +1,9 @@
-# Downloads the libraries and assets for one shared cache group.
+# Downloads the libraries and assets for the shared test cache.
 #
-# Called by the Prepare Cache jobs. All files land in a single shared directory
-# (Maven-style libraries plus content-addressed assets) that is then saved as
-# one cache entry and restored read-only by the test jobs.
+# Versions are processed one after another on purpose: assets and libraries are
+# heavily shared between versions, and the download helper skips files that are
+# already present, so a cold cache only ever downloads the union of all files
+# instead of re-fetching the same objects for every version.
 
 [CmdletBinding()]
 param(
@@ -10,8 +11,7 @@ param(
     [Parameter(Mandatory)][string]$CacheDir,
     [Parameter(Mandatory)][string]$WorkDir,
     [switch]$SkipSoundAssets,
-    [int]$MaxParallel = 3,
-    [int]$ThrottleLimit = 12
+    [int]$ThrottleLimit = 16
 )
 
 Set-StrictMode -Version 1.0
@@ -25,34 +25,32 @@ $parsedEntries = ConvertFrom-Json -InputObject $Entries
 $entryList = @($parsedEntries)
 New-Item -ItemType Directory -Force -Path $CacheDir, $WorkDir | Out-Null
 
-Write-Host "Preparing shared cache for $($entryList.Count) Minecraft version(s) (skipSounds=$([bool]$SkipSoundAssets), parallel=$MaxParallel)"
+Write-Host "Preparing shared cache for $($entryList.Count) Minecraft version(s) (skipSounds=$([bool]$SkipSoundAssets))"
 Write-Host "Cache directory: $CacheDir"
 
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-$failed = @($entryList | ForEach-Object -Parallel {
-        $entry = $_
-        $ProgressPreference = 'SilentlyContinue'
-        $skipSounds = [bool]$using:SkipSoundAssets
-        Import-Module (Join-Path $using:libDir 'MetaLauncher.psm1') -Force
-        Import-Module (Join-Path $using:libDir 'MinecraftLauncher.psm1') -Force
+$failed = @()
+$index = 0
 
-        $loaders = @($entry.loaders | ConvertFrom-Json)
-        Write-Host "[$($entry.mc)] start ($($loaders.Count) loader(s))"
-        foreach ($loader in $loaders) {
-            try {
-                $profile = Get-MergedLaunchProfile -McVersion $entry.mc -Loader $loader.name -LoaderVersion $loader.version
-                $null = Install-MinecraftRuntime -Profile $profile -CacheDir $using:CacheDir `
-                    -WorkDir (Join-Path $using:WorkDir "$($entry.mc)/$($loader.name)") `
-                    -SkipSoundAssets:$skipSounds -ThrottleLimit $using:ThrottleLimit
-                Write-Host "[$($entry.mc)/$($loader.name)] cached"
-            } catch {
-                return [pscustomobject]@{ mc = $entry.mc; loader = $loader.name; error = "$_" }
-            }
+foreach ($entry in $entryList) {
+    $index++
+    $loaders = @($entry.loaders | ConvertFrom-Json)
+    Write-Host "[$index/$($entryList.Count)] $($entry.mc): $($loaders.Count) loader(s)"
+
+    foreach ($loader in $loaders) {
+        $loaderWatch = [System.Diagnostics.Stopwatch]::StartNew()
+        try {
+            $profile = Get-MergedLaunchProfile -McVersion $entry.mc -Loader $loader.name -LoaderVersion $loader.version
+            $null = Install-MinecraftRuntime -Profile $profile -CacheDir $CacheDir `
+                -WorkDir (Join-Path $WorkDir "$($entry.mc)/$($loader.name)") `
+                -SkipSoundAssets:$SkipSoundAssets -ThrottleLimit $ThrottleLimit
+            Write-Host "[$($entry.mc)/$($loader.name)] cached in $([Math]::Round($loaderWatch.Elapsed.TotalSeconds, 1))s"
+        } catch {
+            $failed += [pscustomobject]@{ mc = $entry.mc; loader = $loader.name; error = "$_" }
         }
-        return $null
-    } -ThrottleLimit $MaxParallel)
+    }
+}
 
-$failed = @($failed | Where-Object { $null -ne $_ })
 $stopwatch.Stop()
 
 $files = @(Get-ChildItem -LiteralPath $CacheDir -Recurse -File -ErrorAction SilentlyContinue)

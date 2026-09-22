@@ -134,6 +134,8 @@ jobs:
         with:
           path: ${{ runner.temp }}/shared-cache
           key: ${{ matrix.key }}
+          restore-keys: |
+            mc-shared-win-
 
       - name: Prepare shared cache
         if: steps.shared-cache.outputs.cache-hit != 'true'
@@ -148,8 +150,7 @@ jobs:
             -CacheDir "$env:RUNNER_TEMP/shared-cache" `
             -WorkDir "$env:RUNNER_TEMP/cache-work" `
             -SkipSoundAssets:$skipSounds `
-            -MaxParallel 4 `
-            -ThrottleLimit 10
+            -ThrottleLimit 16
 
       - name: Save shared cache
         if: steps.shared-cache.outputs.cache-hit != 'true'
@@ -197,6 +198,8 @@ jobs:
         with:
           path: ${{ runner.temp }}/shared-cache
           key: ${{ matrix.cacheKey }}
+          restore-keys: |
+            mc-shared-win-
 
       - name: Restore Mesa3D cache
         uses: actions/cache/restore@v4

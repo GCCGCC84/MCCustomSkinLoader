@@ -242,13 +242,42 @@ function Invoke-McFileDownload {
         return @()
     }
 
-    $total = $pending.Count
+    # Split already cached files here, single threaded, so they never pay
+    # runspace task overhead. The parallel workers keep their own safety check.
+    $toDownload = New-Object System.Collections.Generic.List[object]
+    $alreadyCached = 0
+    foreach ($item in $pending) {
+        $cached = $false
+        try {
+            if (Test-Path -LiteralPath $item.Path) {
+                $existing = Get-Item -LiteralPath $item.Path
+                if ($null -eq $item.Size -or $existing.Length -eq $item.Size) {
+                    $cached = $true
+                }
+            }
+        } catch {
+            # Fall through to a fresh download when the existing file is unusable.
+        }
+
+        if ($cached) {
+            $alreadyCached++
+        } else {
+            $toDownload.Add($item)
+        }
+    }
+
+    Write-Host "  $alreadyCached file(s) already cached, $($toDownload.Count) to download"
+    if ($toDownload.Count -eq 0) {
+        return @()
+    }
+
+    $total = $toDownload.Count
     $failed = @()
     $batchSize = [Math]::Max($ThrottleLimit * 4, 32)
 
     for ($offset = 0; $offset -lt $total; $offset += $batchSize) {
         $last = [Math]::Min($offset + $batchSize - 1, $total - 1)
-        $batch = @($pending[$offset..$last])
+        $batch = @($toDownload[$offset..$last])
 
         $batchResults = @($batch | ForEach-Object -Parallel {
                 $item = $_
@@ -301,7 +330,7 @@ function Invoke-McFileDownload {
 
         $failed += @($batchResults | Where-Object { $null -ne $_ })
         $processed = [Math]::Min($offset + $batchSize, $total)
-        Write-Host "  processed $processed/$total files ($($failed.Count) failed)"
+        Write-Host "  downloaded $processed/$total files ($($failed.Count) failed)"
     }
 
     $failed = @($failed | Where-Object { $null -ne $_ })
@@ -460,11 +489,11 @@ function Install-MinecraftRuntime {
     }
     $downloads = @($uniqueDownloads.Values)
 
-    Write-Host "Downloading $($downloads.Count) library/client/index files for Minecraft $($Profile['version'])..."
+    Write-Host "Libraries and client files for Minecraft $($Profile['version']): $($downloads.Count) reference(s)"
     Invoke-McFileDownload -Items $downloads -ThrottleLimit $ThrottleLimit
 
     $assetItems = Get-MinecraftAssetPlan -AssetIndexFile $assetIndexFile -AssetsDir $assetsDir -SkipSoundAssets:$SkipSoundAssets
-    Write-Host "Downloading $($assetItems.Count) asset objects for Minecraft $($Profile['version'])..."
+    Write-Host "Asset objects for Minecraft $($Profile['version']): $($assetItems.Count) reference(s)"
     Invoke-McFileDownload -Items $assetItems -ThrottleLimit $ThrottleLimit
 
     if (Test-Path -LiteralPath $nativesDir) {
