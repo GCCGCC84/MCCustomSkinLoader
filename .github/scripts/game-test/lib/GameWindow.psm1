@@ -311,12 +311,3 @@ function Test-SkinScreenshot {
     }
 }
 
-Export-ModuleMember -Function @(
-    'Get-ProcessTreeId',
-    'Get-GameWindow',
-    'Set-GameWindowForeground',
-    'Send-GameKey',
-    'Wait-MinecraftScreenshot',
-    'Save-WindowScreenshot',
-    'Test-SkinScreenshot'
-)

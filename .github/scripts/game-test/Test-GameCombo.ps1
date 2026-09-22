@@ -37,6 +37,13 @@ Import-Module (Join-Path $PSScriptRoot 'lib/MinecraftLauncher.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'lib/Mesa3D.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'lib/GameWindow.psm1') -Force
 
+$requiredCommands = @('Get-MergedLaunchProfile', 'Install-MinecraftRuntime', 'Install-Mesa3D', 'Get-ProcessTreeId')
+$missingCommands = @($requiredCommands | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) })
+if ($missingCommands.Count -gt 0) {
+    Get-Module | ForEach-Object { Write-Warning "loaded module: $($_.Name) ($($_.Path))" }
+    throw "Test harness commands are missing after module import: $($missingCommands -join ', ')"
+}
+
 function Write-CustomSkinLoaderConfig {
     param(
         [Parameter(Mandatory)][string]$Directory,
@@ -272,6 +279,7 @@ $server = $null
 $client = $null
 $windowHandle = [IntPtr]::Zero
 $screenshot = $null
+$capeScreenshot = $null
 
 try {
     Write-Output "=== CustomSkinLoader game test: Minecraft $McVersion / $Loader $(if ($LoaderVersion) { $LoaderVersion }) ==="
@@ -324,7 +332,6 @@ try {
     $processIds = Get-ProcessTreeId -RootId $client.Process.Id
     $windowHandle = Get-GameWindow -ProcessIds $processIds -TitleLike 'Minecraft' -TimeoutSeconds $WindowTimeoutSeconds
     $screenshotsDir = Join-Path $gameDir 'screenshots'
-    $capeScreenshot = $null
 
     if ($windowHandle -ne [IntPtr]::Zero) {
         # First F5 press: third person, camera behind the player (cape visible).

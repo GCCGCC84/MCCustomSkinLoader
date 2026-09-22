@@ -111,9 +111,3 @@ function Get-MesaEnvironment {
     return $environment
 }
 
-Export-ModuleMember -Function @(
-    'Get-SevenZipPath',
-    'Get-LatestMesaVersion',
-    'Install-Mesa3D',
-    'Get-MesaEnvironment'
-)

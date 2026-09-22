@@ -354,17 +354,3 @@ function Get-MinecraftVersionManifestEntry {
     return $entry
 }
 
-Export-ModuleMember -Function @(
-    'Invoke-MetaRequest',
-    'Get-MetaIndex',
-    'Get-MetaVersion',
-    'Select-MetaVersionForMinecraft',
-    'Get-LatestMetaVersion',
-    'ConvertTo-MetaMap',
-    'Merge-MetaComponent',
-    'Resolve-MetaComponent',
-    'Get-LoaderMetaUid',
-    'Get-MergedLaunchProfile',
-    'Get-MinecraftVersionManifest',
-    'Get-MinecraftVersionManifestEntry'
-)

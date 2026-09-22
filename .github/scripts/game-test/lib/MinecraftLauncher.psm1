@@ -3,13 +3,18 @@
 # Provides library/asset resolution, parallel downloads, natives extraction and
 # launch argument construction. Only the features needed for CI game testing are
 # implemented; no GUI, no authentication, no launcher profile handling.
-
+#
 # Version 1.0 keeps uninitialized-variable checks while allowing optional JSON
 # properties to be read as $null.
 Set-StrictMode -Version 1.0
 $ErrorActionPreference = 'Stop'
 
-Import-Module (Join-Path $PSScriptRoot 'MetaLauncher.psm1') -Force
+# MetaLauncher functions are used by this module. Import it once into the global
+# session if the caller has not already done so. Never re-import with -Force
+# here: that would detach the caller's imported MetaLauncher commands.
+if (-not (Get-Command Get-MetaVersion -ErrorAction SilentlyContinue)) {
+    Import-Module (Join-Path $PSScriptRoot 'MetaLauncher.psm1') -Scope Global
+}
 
 function Test-MetaLibraryAllowed {
     param([Parameter(Mandatory)][object]$Library)
@@ -720,20 +725,3 @@ function Stop-ProcessTree {
     }
 }
 
-Export-ModuleMember -Function @(
-    'Test-MetaLibraryAllowed',
-    'Get-MavenPath',
-    'Get-MinecraftLibraryPlan',
-    'Expand-NativeArchive',
-    'Invoke-McFileDownload',
-    'Get-MinecraftAssetPlan',
-    'Resolve-MinecraftClientJar',
-    'Install-MinecraftRuntime',
-    'Expand-MinecraftArgument',
-    'Get-OfflineUuid',
-    'New-MinecraftLaunchArguments',
-    'ConvertTo-ProcessArgument',
-    'Start-MinecraftClient',
-    'Complete-MinecraftClientOutput',
-    'Stop-ProcessTree'
-)
