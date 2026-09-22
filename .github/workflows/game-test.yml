@@ -34,7 +34,7 @@ on:
       join_timeout:
         description: 'Seconds to wait for the client to join the server'
         required: false
-        default: '300'
+        default: '900'
 
 concurrency:
   group: game-test-${{ github.ref }}
@@ -105,7 +105,7 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJSON(github.event.inputs.max_parallel || '8') }}
+      max-parallel: ${{ fromJSON(github.event.inputs.max_parallel || '32') }}
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v7
