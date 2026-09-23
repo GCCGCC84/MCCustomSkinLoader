@@ -1,0 +1,79 @@
+name: Tessellation Diagnostic
+
+on:
+  push:
+    branches: ['diagnostic/tessellation-ci-20260923']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: tessellation-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: ${{ matrix.mc }}-${{ matrix.loader }}-${{ matrix.mode }}
+    runs-on: windows-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        include:
+          - {mc: '1.14.4', loader: fabric, loader_version: '0.19.5', mode: baseline, mod: true, deferred: false}
+          - {mc: '1.14.4', loader: fabric, loader_version: '0.19.5', mode: no-csl, mod: false, deferred: false}
+          - {mc: '1.16', loader: quilt, loader_version: '0.30.1', mode: baseline, mod: true, deferred: false}
+          - {mc: '1.16', loader: quilt, loader_version: '0.30.1', mode: no-csl, mod: false, deferred: false}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '8.0.504+1'
+      - name: Download original tested mod
+        uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: 35731352175
+          name: CustomSkinLoader-GameTest-7
+          path: artifact
+      - uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/shared-cache
+          key: mc-shared-win-b6009a63e90f-v1
+      - uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/mesa-cache
+          key: mesa3d-msvc-26.2.0
+      - name: Run focused diagnostic
+        shell: pwsh
+        env:
+          MC_VERSION: ${{ matrix.mc }}
+          LOADER: ${{ matrix.loader }}
+          LOADER_VERSION: ${{ matrix.loader_version }}
+          PROBE_MODE: ${{ matrix.mode }}
+          WITH_CSL: ${{ matrix.mod }}
+          DEFERRED_JOIN: ${{ matrix.deferred }}
+        run: |
+          $jar = Get-ChildItem artifact -Recurse -Filter '*.jar' |
+            Where-Object { $_.Name -notlike '*-sources.jar' } | Select-Object -First 1
+          if (-not $jar) { throw 'Original mod artifact missing' }
+          & ./.github/scripts/game-test/diagnostic/Invoke-TessellationProbe.ps1 `
+            -McVersion $env:MC_VERSION -Loader $env:LOADER -LoaderVersion $env:LOADER_VERSION `
+            -Mode $env:PROBE_MODE -WithCsl:($env:WITH_CSL -eq 'true') `
+            -DeferredJoin:($env:DEFERRED_JOIN -eq 'true') -ModJar $jar.FullName `
+            -JavaHome $env:JAVA_HOME -CacheDir "$env:RUNNER_TEMP/shared-cache" `
+            -MesaCacheDir "$env:RUNNER_TEMP/mesa-cache" -WorkDir "$env:RUNNER_TEMP/probe" `
+            -ResultDir "diagnostic-results" -ObserveSeconds 90
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tessellation-${{ matrix.mc }}-${{ matrix.loader }}-${{ matrix.mode }}
+          path: diagnostic-results/
+          include-hidden-files: true
+          retention-days: 14
+          if-no-files-found: warn

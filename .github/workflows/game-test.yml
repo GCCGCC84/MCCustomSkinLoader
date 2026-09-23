@@ -12,6 +12,7 @@ name: Game Test
 
 on:
   push:
+    branches-ignore: ['diagnostic/**']
   pull_request:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
