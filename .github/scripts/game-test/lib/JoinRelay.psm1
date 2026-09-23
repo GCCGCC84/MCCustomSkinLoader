@@ -43,6 +43,7 @@ public static class CslJoinRelay
         public readonly List<PendingKeepAlive> Pending = new List<PendingKeepAlive>();
         public NetworkStream To;
         public NetworkStream Upstream;
+        public bool LoginPacketForwarded;
     }
 
     private static TcpListener listener;
@@ -199,11 +200,23 @@ public static class CslJoinRelay
                     {
                         if (length > threshold)
                         {
-                            WriteVarInt(state.Held, length);
-                            state.Held.Write(frame, 0, length);
-                            Interlocked.Increment(ref heldFrames);
-                            Interlocked.Add(ref heldBytes, length);
-                            continue;
+                            // The first large play packet is Join Game (it carries
+                            // the dimension registry on 1.16+). Without it the
+                            // client's handlers for the follow-up packets throw
+                            // NPEs, so always forward it and only hold the world
+                            // data that comes after.
+                            if (!state.LoginPacketForwarded)
+                            {
+                                state.LoginPacketForwarded = true;
+                            }
+                            else
+                            {
+                                WriteVarInt(state.Held, length);
+                                state.Held.Write(frame, 0, length);
+                                Interlocked.Increment(ref heldFrames);
+                                Interlocked.Add(ref heldBytes, length);
+                                continue;
+                            }
                         }
                         // Small control frame (keep-alive, position, ...): forward
                         // it, but keep holding the buffered world data.
