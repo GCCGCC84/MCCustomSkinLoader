@@ -67,6 +67,13 @@ if (-not (Test-Path -LiteralPath $propertiesFile)) {
         'online-mode=false'
         "server-port=$Port"
         'server-ip=127.0.0.1'
+        'white-list=false'
+        'enforce-whitelist=false'
+        # Keep world packets large so the join relay can hold them by frame
+        # size; compression squashes the flat world's mostly-air chunks below
+        # the relay threshold and they would leak through before the client
+        # finished its first resource reload.
+        'network-compression-threshold=-1'
         'level-type=flat'
         'spawn-protection=0'
         'view-distance=6'

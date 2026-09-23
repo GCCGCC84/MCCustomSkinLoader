@@ -323,7 +323,10 @@ try {
 
     $runtime = Install-MinecraftRuntime -Profile $profile -CacheDir $CacheDir -WorkDir $WorkDir -SkipSoundAssets:$SkipSoundAssets
 
-    $mesaEnvironment = @{}
+    # The runner has no audio device; without a null OpenAL backend the sound
+    # engine error handling can stall the first resource reload for up to 30
+    # seconds, which is long enough for the server to time the client out.
+    $mesaEnvironment = @{ ALSOFT_DRIVERS = 'null' }
     if (-not $SkipMesa) {
         # LWJGL 2 loads opengl32.dll with the Win32 LoadLibrary search order,
         # where the executable directory beats PATH. Deploy Mesa next to
@@ -331,7 +334,10 @@ try {
         $mesa = Install-Mesa3D -CacheDir $MesaCacheDir -Destination $runtime.NativesDir `
             -AdditionalDestination (Split-Path -Parent $javaExe)
         Write-Output "Mesa3D $($mesa.Version) deployed to $($runtime.NativesDir) and $((Split-Path -Parent $javaExe))"
-        $mesaEnvironment = Get-MesaEnvironment -MesaRoot $mesa.Root
+        $mesaEnv = Get-MesaEnvironment -MesaRoot $mesa.Root
+        foreach ($key in $mesaEnv.Keys) {
+            $mesaEnvironment[$key] = $mesaEnv[$key]
+        }
     }
 
     if (Test-Path -LiteralPath $gameDir) {
