@@ -27,7 +27,7 @@ on:
       max_parallel:
         description: 'Maximum number of parallel Minecraft version jobs'
         required: false
-        default: '8'
+        default: '32'
       skip_sound_assets:
         description: 'Skip downloading sound assets (smaller caches, no effect on visuals)'
         type: boolean
@@ -167,7 +167,7 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJSON(github.event.inputs.max_parallel || '8') }}
+      max-parallel: ${{ fromJSON(github.event.inputs.max_parallel || '32') }}
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v7

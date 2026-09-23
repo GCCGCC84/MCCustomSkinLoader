@@ -151,9 +151,12 @@ foreach ($mcVersion in $allVersions) {
     }
 
     $loaderJson = ConvertTo-Json -InputObject @($loaderEntries) -Compress -Depth 5
+    # ModLauncher (Forge 1.13-1.16) reflects on sun.security.util.ManifestEntryVerifier,
+    # whose constructor is gone in JDK 8u312+; pin Java 8 to the last working update.
+    $javaVersion = if ($javaMajor -eq 8) { '8.0.302' } else { "$javaMajor" }
     $include += [ordered]@{
         mc      = $mcVersion
-        java    = "$javaMajor"
+        java    = $javaVersion
         loaders = $loaderJson
     }
     $cacheEntries += [ordered]@{

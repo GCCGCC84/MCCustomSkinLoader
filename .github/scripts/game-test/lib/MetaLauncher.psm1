@@ -223,6 +223,134 @@ function Merge-MetaComponent {
     return $result
 }
 
+function Compare-MavenVersion {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Left,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Right
+    )
+
+    if ($Left -eq $Right) {
+        return 0
+    }
+
+    $leftParts = @($Left -split '[.\-_+]' | Where-Object { $_ -ne '' })
+    $rightParts = @($Right -split '[.\-_+]' | Where-Object { $_ -ne '' })
+    $count = [Math]::Max($leftParts.Count, $rightParts.Count)
+
+    for ($index = 0; $index -lt $count; $index++) {
+        $leftPart = if ($index -lt $leftParts.Count) { $leftParts[$index] } else { $null }
+        $rightPart = if ($index -lt $rightParts.Count) { $rightParts[$index] } else { $null }
+
+        if ($null -eq $leftPart -and $null -eq $rightPart) {
+            continue
+        }
+        # A missing segment ranks above a qualifier (1.0 > 1.0-beta) but below
+        # a numeric segment (1.0 < 1.0.1).
+        if ($null -eq $leftPart) {
+            if ($rightPart -match '^\d+$') { return -1 }
+            return 1
+        }
+        if ($null -eq $rightPart) {
+            if ($leftPart -match '^\d+$') { return 1 }
+            return -1
+        }
+
+        $leftNumber = 0
+        $rightNumber = 0
+        $leftIsNumber = [int]::TryParse($leftPart, [ref]$leftNumber)
+        $rightIsNumber = [int]::TryParse($rightPart, [ref]$rightNumber)
+
+        if ($leftIsNumber -and $rightIsNumber) {
+            if ($leftNumber -ne $rightNumber) {
+                return $leftNumber - $rightNumber
+            }
+        } elseif ($leftIsNumber) {
+            return 1
+        } elseif ($rightIsNumber) {
+            return -1
+        } else {
+            $comparison = [string]::Compare($leftPart, $rightPart, [System.StringComparison]::OrdinalIgnoreCase)
+            if ($comparison -ne 0) {
+                return $comparison
+            }
+        }
+    }
+
+    return 0
+}
+
+function Get-MetaLibraryPlatformKey {
+    param([AllowNull()][object]$Library)
+
+    # Platform-specific variants (for example org.lwjgl:lwjgl-glfw with
+    # linux-arm64 or osx-arm64 rules) share the same maven coordinate with the
+    # Windows build, so the rules must be part of the dedup key.
+    $parts = @()
+    foreach ($rule in @($Library.rules)) {
+        if ($null -eq $rule) {
+            continue
+        }
+        $os = $rule.os
+        $osName = if ($null -ne $os) { [string]$os.name } else { '' }
+        $osArch = if ($null -ne $os) { [string]$os.arch } else { '' }
+        $osVersion = if ($null -ne $os) { [string]$os.version } else { '' }
+        $parts += "$($rule.action)/$osName/$osArch/$osVersion"
+    }
+    return ($parts -join ';')
+}
+
+function Select-MinecraftLibraries {
+    param([AllowNull()][object[]]$Libraries)
+
+    # Loader components repeat some vanilla libraries with a newer version (for
+    # example org.ow2.asm:asm) and both copies would end up on the classpath,
+    # which makes the loader fail. Keep the highest version per maven
+    # coordinate (group:artifact:classifier) and per rules variant in
+    # first-seen order.
+    $selected = [ordered]@{}
+    $unparsed = @()
+
+    foreach ($library in @($Libraries)) {
+        if ($null -eq $library) {
+            continue
+        }
+        if (-not $library.name) {
+            $unparsed += $library
+            continue
+        }
+
+        $coordinates = ([string]$library.name) -replace '@[^@]+$', ''
+        $parts = @($coordinates -split ':')
+        if ($parts.Count -lt 3) {
+            $unparsed += $library
+            continue
+        }
+
+        $group = $parts[0]
+        $artifact = $parts[1]
+        $version = [string]$parts[2]
+        $classifier = if ($parts.Count -ge 4 -and $parts[3]) { [string]$parts[3] } else { '' }
+        $platform = Get-MetaLibraryPlatformKey -Library $library
+        $key = "$group`:$artifact`:$classifier`:$platform"
+
+        if (-not $selected.Contains($key)) {
+            $selected[$key] = [pscustomobject]@{ Library = $library; Version = $version }
+            continue
+        }
+
+        $current = $selected[$key]
+        $comparison = Compare-MavenVersion -Left $version -Right $current.Version
+        if ($comparison -gt 0) {
+            $selected[$key] = [pscustomobject]@{ Library = $library; Version = $version }
+        } elseif ($comparison -eq 0 -and $null -eq $current.Library.natives -and $null -ne $library.natives) {
+            # Same version: prefer the entry that carries the natives metadata.
+            $selected[$key] = [pscustomobject]@{ Library = $library; Version = $version }
+        }
+    }
+
+    return @(@($selected.Values | ForEach-Object { $_.Library }) + $unparsed)
+}
+
 function Resolve-MetaComponent {
     param(
         [Parameter(Mandatory)][string]$Uid,
@@ -314,6 +442,11 @@ function Get-MergedLaunchProfile {
     # ForgeWrapper's file detector all depend on the actual game version.
     $profile['version'] = $McVersion
     $profile['uid'] = 'net.minecraft'
+
+    if ($null -ne $profile['libraries'] -and @($profile['libraries']).Count -gt 0) {
+        $profile['libraries'] = @(Select-MinecraftLibraries -Libraries @($profile['libraries']))
+    }
+
     return $profile
 }
 

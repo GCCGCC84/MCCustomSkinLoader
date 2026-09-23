@@ -36,8 +36,12 @@ Import-Module (Join-Path $PSScriptRoot 'lib/MetaLauncher.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'lib/MinecraftLauncher.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'lib/Mesa3D.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'lib/GameWindow.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'lib/JoinRelay.psm1') -Force
 
-$requiredCommands = @('Get-MergedLaunchProfile', 'Install-MinecraftRuntime', 'Install-Mesa3D', 'Get-ProcessTreeId')
+$requiredCommands = @(
+    'Get-MergedLaunchProfile', 'Install-MinecraftRuntime', 'Install-Mesa3D', 'Get-ProcessTreeId',
+    'Test-JoinRelayRequired', 'Start-JoinRelay', 'Set-JoinRelayRelease', 'Stop-JoinRelay', 'Get-FreeTcpPort'
+)
 $missingCommands = @($requiredCommands | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) })
 if ($missingCommands.Count -gt 0) {
     Get-Module | ForEach-Object { Write-Warning "loaded module: $($_.Name) ($($_.Path))" }
@@ -109,6 +113,36 @@ function Wait-ServerJoin {
             $content = Get-Content -LiteralPath $Server.LogFile -Raw -ErrorAction SilentlyContinue
             if ($content -match 'joined the game') {
                 return $true
+            }
+        }
+        Start-Sleep -Seconds 2
+    }
+    return $false
+}
+
+function Wait-JoinRelayRelease {
+    param(
+        [Parameter(Mandatory)][string]$LogPath,
+        [int]$HoldSeconds = 12,
+        [int]$TimeoutSeconds = 180
+    )
+
+    # The atlas marker is written while the first resource reload finishes; the
+    # extra hold is a safety margin because the model registry and the block
+    # state cache are populated right after it. The client is parked at
+    # "Joining world" and keeps answering keep-alives, so waiting longer is
+    # harmless.
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $atlasSeenAt = $null
+    while ((Get-Date) -lt $deadline) {
+        if (Test-Path -LiteralPath $LogPath) {
+            $content = Get-Content -LiteralPath $LogPath -Raw -ErrorAction SilentlyContinue
+            if ($null -ne $content -and $content -match 'Created: .*atlas') {
+                if ($null -eq $atlasSeenAt) {
+                    $atlasSeenAt = Get-Date
+                } elseif (((Get-Date) - $atlasSeenAt).TotalSeconds -ge $HoldSeconds) {
+                    return $true
+                }
             }
         }
         Start-Sleep -Seconds 2
@@ -308,12 +342,39 @@ try {
     Write-CustomSkinLoaderConfig -Directory (Join-Path $gameDir 'CustomSkinLoader') -Username $Username `
         -SkinPng $SkinPng -CapePng $CapePng
 
+    # A fresh game directory shows the accessibility onboarding screen on
+    # Minecraft 1.19.1+, which blocks quick play from joining the server.
+    Set-Content -LiteralPath (Join-Path $gameDir 'options.txt') -Value 'onboardAccessibility:false' -Encoding utf8
+
+    $useJoinRelay = Test-JoinRelayRequired -McVersion $McVersion -Loader $Loader
+    # Minecraft 1.16.4/1.16.5 silently treats the offline privileges response as
+    # "servers not allowed" and skips the --server auto-connect. Pointing the
+    # game proxy at a closed local port makes the request fail, so the client
+    # falls back to the offline social service and allows servers again.
+    $useDeadProxy = ($McVersion -match '^1\.16\.[45]$')
+    $upstreamPort = if ($useJoinRelay) { [int]$ServerPort + 1 } else { [int]$ServerPort }
+
     $server = & (Join-Path $PSScriptRoot 'Start-VanillaServer.ps1') -McVersion $McVersion -JavaExe $javaExe `
-        -ServerDir $serverDir -CacheDir $CacheDir -Port $ServerPort -TimeoutSeconds $ServerTimeoutSeconds
+        -ServerDir $serverDir -CacheDir $CacheDir -Port $upstreamPort -TimeoutSeconds $ServerTimeoutSeconds
+
+    if ($useJoinRelay) {
+        Write-Output "Join relay: client -> $ServerPort -> server $upstreamPort"
+        [void](Start-JoinRelay -ListenPort $ServerPort -UpstreamPort $upstreamPort)
+    }
 
     $launch = New-MinecraftLaunchArguments -Profile $profile -Runtime $runtime -JavaExe $javaExe `
         -GameDir $gameDir -Username $Username -ServerHost $ServerHost -ServerPort $ServerPort `
         -MaxMemoryMb $MaxMemoryMb
+
+    $extraGameArguments = @()
+    if ($useDeadProxy) {
+        $deadProxyPort = Get-FreeTcpPort
+        $extraGameArguments += @('--proxyHost', '127.0.0.1', '--proxyPort', [string]$deadProxyPort)
+        Write-Output "Dead proxy for the offline privileges check: 127.0.0.1:$deadProxyPort"
+    }
+    if ($extraGameArguments.Count -gt 0) {
+        $launch.Arguments = @($launch.Arguments) + $extraGameArguments
+    }
 
     Write-Output "Launching Minecraft client ..."
     $client = Start-MinecraftClient -JavaExe $launch.File -Arguments $launch.Arguments `
@@ -326,6 +387,16 @@ try {
     }
     $result.joined = $true
     Write-Output "Client joined the server."
+
+    if ($useJoinRelay) {
+        $clientLog = Join-Path $gameDir 'logs/latest.log'
+        if (-not (Wait-JoinRelayRelease -LogPath $clientLog -HoldSeconds 12 -TimeoutSeconds 180)) {
+            Write-Warning 'Resource reload marker was not seen; releasing the join relay anyway'
+        }
+        Set-JoinRelayRelease
+        Write-Output "Join relay: $(Get-JoinRelayStatus)"
+        Start-Sleep -Seconds 5
+    }
 
     # Wait until CustomSkinLoader has applied a profile (and give the world a
     # moment to render) before taking the screenshots.
@@ -408,6 +479,8 @@ try {
         Get-FileTail -Path $server.LogFile | ForEach-Object { Write-Warning $_ }
     }
 } finally {
+    Stop-JoinRelay
+
     if ($client) {
         try {
             if (-not $client.Process.HasExited) {
