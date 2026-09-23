@@ -11,9 +11,8 @@ name: Game Test
 # restrict the run to a subset of game versions or loaders.
 
 on:
-  push:
-  pull_request:
-    types: [opened, synchronize, reopened]
+  # Diagnostic branch: manual dispatch only, so pushing does not launch the
+  # full matrix while iterating on the join relay.
   workflow_dispatch:
     inputs:
       game_versions:

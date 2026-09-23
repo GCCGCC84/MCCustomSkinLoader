@@ -39,6 +39,7 @@ public static class CslJoinRelay
     private static volatile bool released;
     private static int heldFrames;
     private static long heldBytes;
+    private static int earlyFlushes;
     private static string lastStatus = "idle";
     private static readonly object statusGate = new object();
 
@@ -48,6 +49,7 @@ public static class CslJoinRelay
         released = false;
         heldFrames = 0;
         heldBytes = 0;
+        earlyFlushes = 0;
         listener = new TcpListener(IPAddress.Loopback, listenPort);
         listener.Start();
         running = true;
@@ -61,7 +63,8 @@ public static class CslJoinRelay
     {
         released = true;
         SetStatus("released heldFrames=" + Interlocked.CompareExchange(ref heldFrames, 0, 0)
-            + " heldBytes=" + Interlocked.Read(ref heldBytes));
+            + " heldBytes=" + Interlocked.Read(ref heldBytes)
+            + " earlyFlushes=" + Interlocked.CompareExchange(ref earlyFlushes, 0, 0));
     }
 
     public static string GetStatus()
@@ -156,14 +159,24 @@ public static class CslJoinRelay
 
                 lock (state.Gate)
                 {
-                    if (!released && length > threshold)
+                    if (!released)
                     {
-                        WriteVarInt(state.Held, length);
-                        state.Held.Write(frame, 0, length);
-                        Interlocked.Increment(ref heldFrames);
-                        Interlocked.Add(ref heldBytes, length);
+                        if (length > threshold)
+                        {
+                            WriteVarInt(state.Held, length);
+                            state.Held.Write(frame, 0, length);
+                            Interlocked.Increment(ref heldFrames);
+                            Interlocked.Add(ref heldBytes, length);
+                            continue;
+                        }
+                        // Small control frame (keep-alive, position, ...): forward
+                        // it, but keep holding the buffered world data.
+                        WriteVarInt(state.To, length);
+                        if (length > 0) state.To.Write(frame, 0, length);
+                        state.To.Flush();
                         continue;
                     }
+
                     FlushHeld(state);
                     WriteVarInt(state.To, length);
                     if (length > 0) state.To.Write(frame, 0, length);
@@ -198,6 +211,13 @@ public static class CslJoinRelay
     private static void FlushHeld(RelayState state)
     {
         if (state.Held.Length == 0) return;
+        if (!released)
+        {
+            // Never release buffered world data before the harness says the
+            // client is ready; keep it as a regression guard.
+            Interlocked.Increment(ref earlyFlushes);
+            return;
+        }
         var data = state.Held.ToArray();
         state.Held.SetLength(0);
         state.Held.Position = 0;

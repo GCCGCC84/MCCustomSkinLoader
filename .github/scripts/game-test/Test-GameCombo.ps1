@@ -26,7 +26,8 @@ param(
     [int]$ServerTimeoutSeconds = 300,
     [int]$WindowTimeoutSeconds = 120,
     [int]$ScreenshotTimeoutSeconds = 30,
-    [int]$MaxMemoryMb = 2048
+    [int]$MaxMemoryMb = 2048,
+    [int]$JoinRelayHoldSeconds = 12
 )
 
 Set-StrictMode -Version 1.0
@@ -396,7 +397,7 @@ try {
 
     if ($useJoinRelay) {
         $clientLog = Join-Path $gameDir 'logs/latest.log'
-        if (-not (Wait-JoinRelayRelease -LogPath $clientLog -HoldSeconds 12 -TimeoutSeconds 180)) {
+        if (-not (Wait-JoinRelayRelease -LogPath $clientLog -HoldSeconds $JoinRelayHoldSeconds -TimeoutSeconds 180)) {
             Write-Warning 'Resource reload marker was not seen; releasing the join relay anyway'
         }
         Set-JoinRelayRelease
