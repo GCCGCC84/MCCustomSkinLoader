@@ -55,11 +55,13 @@ public static class CslJoinRelay
     private static int earlyFlushes;
     private static int keepAliveClientboundId = -1;
     private static int keepAliveServerboundId = -1;
+    private static int hintClientboundId = -1;
+    private static int hintServerboundId = -1;
     private static int emulatedAcks;
     private static string lastStatus = "idle";
     private static readonly object statusGate = new object();
 
-    public static void Start(int listenPort, int upstreamPort, int threshold)
+    public static void Start(int listenPort, int upstreamPort, int threshold, int hintClientbound, int hintServerbound)
     {
         Stop();
         released = false;
@@ -68,6 +70,8 @@ public static class CslJoinRelay
         earlyFlushes = 0;
         keepAliveClientboundId = -1;
         keepAliveServerboundId = -1;
+        hintClientboundId = hintClientbound;
+        hintServerboundId = hintServerbound;
         emulatedAcks = 0;
         listener = new TcpListener(IPAddress.Loopback, listenPort);
         listener.Start();
@@ -75,7 +79,13 @@ public static class CslJoinRelay
         acceptThread = new Thread(() => AcceptLoop(upstreamPort, threshold));
         acceptThread.IsBackground = true;
         acceptThread.Start();
-        SetStatus("listening " + listenPort + " -> " + upstreamPort);
+        SetStatus("listening " + listenPort + " -> " + upstreamPort
+            + " keepAliveHint=" + FormatId(hintClientbound) + "/" + FormatId(hintServerbound));
+    }
+
+    private static string FormatId(int id)
+    {
+        return id >= 0 ? "0x" + id.ToString("x2") : "?";
     }
 
     public static void Release()
@@ -84,7 +94,9 @@ public static class CslJoinRelay
         SetStatus("released heldFrames=" + Interlocked.CompareExchange(ref heldFrames, 0, 0)
             + " heldBytes=" + Interlocked.Read(ref heldBytes)
             + " earlyFlushes=" + Interlocked.CompareExchange(ref earlyFlushes, 0, 0)
-            + " emulatedAcks=" + Interlocked.CompareExchange(ref emulatedAcks, 0, 0));
+            + " emulatedAcks=" + Interlocked.CompareExchange(ref emulatedAcks, 0, 0)
+            + " keepAlive=" + FormatId(keepAliveClientboundId >= 0 ? keepAliveClientboundId : hintClientboundId)
+            + "/" + FormatId(keepAliveServerboundId >= 0 ? keepAliveServerboundId : hintServerboundId));
     }
 
     public static string GetStatus()
@@ -244,7 +256,7 @@ public static class CslJoinRelay
         int id = ReadVarIntFromBytes(payload, length, out int idBytes);
         if (id < 0 || idBytes < 1 || length - idBytes != 8) return;
 
-        int known = keepAliveClientboundId;
+        int known = keepAliveClientboundId >= 0 ? keepAliveClientboundId : hintClientboundId;
         if (known >= 0 && id != known) return;
 
         long nonce = ReadInt64(payload, length - 8);
@@ -309,7 +321,7 @@ public static class CslJoinRelay
 
     private static void EmulateKeepAlives(RelayState state)
     {
-        int serverbound = keepAliveServerboundId;
+        int serverbound = keepAliveServerboundId >= 0 ? keepAliveServerboundId : hintServerboundId;
         if (serverbound < 0 || state.Upstream == null) return;
         lock (state.Gate)
         {
@@ -458,15 +470,38 @@ function Get-FreeTcpPort {
     }
 }
 
+function Get-JoinRelayKeepAliveIds {
+    param([Parameter(Mandatory)][string]$McVersion)
+
+    # Packet ids verified against PrismarineJS/minecraft-data for the versions
+    # where the client is often too busy during the first resource reload to
+    # answer the keep-alive (so the relay cannot learn them at runtime).
+    $table = @{
+        '1.13' = @{ Clientbound = 0x21; Serverbound = 0x0E }
+        '1.14' = @{ Clientbound = 0x20; Serverbound = 0x0F }
+        '1.15' = @{ Clientbound = 0x21; Serverbound = 0x0F }
+    }
+
+    if ($McVersion -match '^(\d+\.\d+)') {
+        $key = $Matches[1]
+        if ($table.ContainsKey($key)) {
+            return $table[$key]
+        }
+    }
+    return $null
+}
+
 function Start-JoinRelay {
     param(
         [Parameter(Mandatory)][int]$ListenPort,
         [Parameter(Mandatory)][int]$UpstreamPort,
-        [int]$FrameThreshold = 64
+        [int]$FrameThreshold = 64,
+        [int]$ClientboundKeepAliveId = -1,
+        [int]$ServerboundKeepAliveId = -1
     )
 
     Initialize-JoinRelay
-    [CslJoinRelay]::Start($ListenPort, $UpstreamPort, $FrameThreshold)
+    [CslJoinRelay]::Start($ListenPort, $UpstreamPort, $FrameThreshold, $ClientboundKeepAliveId, $ServerboundKeepAliveId)
     return [pscustomobject]@{
         ListenPort     = $ListenPort
         UpstreamPort   = $UpstreamPort

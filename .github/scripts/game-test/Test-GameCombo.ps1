@@ -42,7 +42,7 @@ Import-Module (Join-Path $PSScriptRoot 'lib/JoinRelay.psm1') -Force
 $requiredCommands = @(
     'Get-MergedLaunchProfile', 'Install-MinecraftRuntime', 'Install-Mesa3D', 'Get-ProcessTreeId',
     'Test-JoinRelayRequired', 'Start-JoinRelay', 'Set-JoinRelayRelease', 'Stop-JoinRelay', 'Get-FreeTcpPort',
-    'Test-JoinRelayKeepAliveReady'
+    'Test-JoinRelayKeepAliveReady', 'Get-JoinRelayKeepAliveIds'
 )
 $missingCommands = @($requiredCommands | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) })
 if ($missingCommands.Count -gt 0) {
@@ -382,7 +382,13 @@ try {
 
     if ($useJoinRelay) {
         Write-Output "Join relay: client -> $ServerPort -> server $upstreamPort"
-        [void](Start-JoinRelay -ListenPort $ServerPort -UpstreamPort $upstreamPort)
+        $keepAliveHint = Get-JoinRelayKeepAliveIds -McVersion $McVersion
+        $relayArguments = @{ ListenPort = $ServerPort; UpstreamPort = $upstreamPort }
+        if ($keepAliveHint) {
+            $relayArguments.ClientboundKeepAliveId = [int]$keepAliveHint.Clientbound
+            $relayArguments.ServerboundKeepAliveId = [int]$keepAliveHint.Serverbound
+        }
+        [void](Start-JoinRelay @relayArguments)
     }
 
     $launch = New-MinecraftLaunchArguments -Profile $profile -Runtime $runtime -JavaExe $javaExe `
@@ -418,10 +424,13 @@ try {
         }
         # The relay answers keep-alives for the client while the first terrain
         # render blocks the main thread; wait until it has learned the packet
-        # ids from a real client answer.
-        $keepAliveDeadline = (Get-Date).AddSeconds(30)
-        while (-not (Test-JoinRelayKeepAliveReady) -and (Get-Date) -lt $keepAliveDeadline) {
-            Start-Sleep -Seconds 2
+        # ids from a real client answer (not needed when a verified fallback
+        # table already provides them).
+        if (-not (Get-JoinRelayKeepAliveIds -McVersion $McVersion)) {
+            $keepAliveDeadline = (Get-Date).AddSeconds(30)
+            while (-not (Test-JoinRelayKeepAliveReady) -and (Get-Date) -lt $keepAliveDeadline) {
+                Start-Sleep -Seconds 2
+            }
         }
         Write-Output "Join relay keep-alive ids learned: $(Test-JoinRelayKeepAliveReady)"
         Set-JoinRelayRelease
