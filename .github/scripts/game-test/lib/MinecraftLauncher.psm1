@@ -433,6 +433,13 @@ function Install-MinecraftRuntime {
 
     New-Item -ItemType Directory -Force -Path $librariesDir, $assetsDir, $loggingDir, $nativesDir | Out-Null
 
+    # Forge 1.14.3's DEOBF_REALMS installertools task derives its default
+    # library root from the client jar path (three parent hops + "libraries").
+    # With the Prism layout that resolves to <libraries>/com/mojang/libraries;
+    # creating it lets the task scan nothing and skip the Realms deobfuscation
+    # instead of failing with "Missing required Library Directory".
+    New-Item -ItemType Directory -Force -Path (Join-Path $librariesDir 'com/mojang/libraries') | Out-Null
+
     $libraryPlan = Get-MinecraftLibraryPlan -Libraries @($Profile['libraries'])
     $libraryArtifacts = @($libraryPlan | Where-Object { $_.Kind -eq 'artifact' })
     $libraryNatives = @($libraryPlan | Where-Object { $_.Kind -eq 'natives' })
@@ -491,6 +498,33 @@ function Install-MinecraftRuntime {
 
     Write-Host "Libraries and client files for Minecraft $($Profile['version']): $($downloads.Count) reference(s)"
     Invoke-McFileDownload -Items $downloads -ThrottleLimit $ThrottleLimit
+
+    # Forge's installertools post-processors (for example DeobfRealms on
+    # 1.14.3) expect the vanilla version JSON next to the client jar.
+    $clientJson = [System.IO.Path]::ChangeExtension($clientJar.Path, '.json')
+    if (-not (Test-Path -LiteralPath $clientJson)) {
+        try {
+            $entry = Get-MinecraftVersionManifestEntry -McVersion ([string]$Profile['version']) -CacheDir $CacheDir
+            $versionJson = Invoke-MetaRequest -Uri $entry.Url
+            $versionJson | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $clientJson -Encoding utf8
+        } catch {
+            Write-Warning "Could not write the vanilla version JSON to '$clientJson': $_"
+        }
+    }
+
+    # DeobfRealms resolves its libraries from the client jar path (three parent
+    # hops + "libraries"), which is <libraries>/com/mojang/libraries in the
+    # Prism layout; mirror the Realms artifact into that location.
+    $realmsRoot = Join-Path $librariesDir 'com/mojang/realms'
+    if (Test-Path -LiteralPath $realmsRoot) {
+        foreach ($realmsVersionDir in @(Get-ChildItem -LiteralPath $realmsRoot -Directory -ErrorAction SilentlyContinue)) {
+            $mirrorDir = Join-Path $librariesDir "com/mojang/libraries/com/mojang/realms/$($realmsVersionDir.Name)"
+            New-Item -ItemType Directory -Force -Path $mirrorDir | Out-Null
+            foreach ($realmsJar in @(Get-ChildItem -LiteralPath $realmsVersionDir.FullName -Filter '*.jar' -File -ErrorAction SilentlyContinue)) {
+                Copy-Item -LiteralPath $realmsJar.FullName -Destination (Join-Path $mirrorDir $realmsJar.Name) -Force
+            }
+        }
+    }
 
     $assetItems = Get-MinecraftAssetPlan -AssetIndexFile $assetIndexFile -AssetsDir $assetsDir -SkipSoundAssets:$SkipSoundAssets
     Write-Host "Asset objects for Minecraft $($Profile['version']): $($assetItems.Count) reference(s)"

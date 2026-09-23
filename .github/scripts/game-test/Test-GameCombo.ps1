@@ -26,7 +26,8 @@ param(
     [int]$ServerTimeoutSeconds = 300,
     [int]$WindowTimeoutSeconds = 120,
     [int]$ScreenshotTimeoutSeconds = 30,
-    [int]$MaxMemoryMb = 2048
+    [int]$MaxMemoryMb = 2048,
+    [int]$JoinRelayHoldSeconds = 12
 )
 
 Set-StrictMode -Version 1.0
@@ -40,7 +41,8 @@ Import-Module (Join-Path $PSScriptRoot 'lib/JoinRelay.psm1') -Force
 
 $requiredCommands = @(
     'Get-MergedLaunchProfile', 'Install-MinecraftRuntime', 'Install-Mesa3D', 'Get-ProcessTreeId',
-    'Test-JoinRelayRequired', 'Start-JoinRelay', 'Set-JoinRelayRelease', 'Stop-JoinRelay', 'Get-FreeTcpPort'
+    'Test-JoinRelayRequired', 'Start-JoinRelay', 'Set-JoinRelayRelease', 'Stop-JoinRelay', 'Get-FreeTcpPort',
+    'Test-JoinRelayKeepAliveReady', 'Get-JoinRelayKeepAliveIds'
 )
 $missingCommands = @($requiredCommands | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) })
 if ($missingCommands.Count -gt 0) {
@@ -241,6 +243,21 @@ function Copy-ResultArtifacts {
         }
     }
 
+    # Crash reports, hs_err and replay logs explain failures where the client
+    # exits without a readable stack in latest.log.
+    foreach ($pattern in @(
+            @{ Dir = (Join-Path $GameDir 'crash-reports'); Filter = '*.txt' },
+            @{ Dir = $GameDir; Filter = 'hs_err_pid*.log' },
+            @{ Dir = $GameDir; Filter = 'replay_pid*.log' }
+        )) {
+        if (-not (Test-Path -LiteralPath $pattern.Dir)) {
+            continue
+        }
+        foreach ($crashFile in @(Get-ChildItem -LiteralPath $pattern.Dir -Filter $pattern.Filter -File -ErrorAction SilentlyContinue)) {
+            Copy-Item -LiteralPath $crashFile.FullName -Destination (Join-Path $logDir $crashFile.Name) -Force
+        }
+    }
+
     foreach ($screenshotPath in @($Screenshots)) {
         if ($screenshotPath -and (Test-Path -LiteralPath $screenshotPath)) {
             $screenshotDir = Join-Path $ResultDirectory 'screenshots'
@@ -365,7 +382,13 @@ try {
 
     if ($useJoinRelay) {
         Write-Output "Join relay: client -> $ServerPort -> server $upstreamPort"
-        [void](Start-JoinRelay -ListenPort $ServerPort -UpstreamPort $upstreamPort)
+        $keepAliveHint = Get-JoinRelayKeepAliveIds -McVersion $McVersion
+        $relayArguments = @{ ListenPort = $ServerPort; UpstreamPort = $upstreamPort }
+        if ($keepAliveHint) {
+            $relayArguments.ClientboundKeepAliveId = [int]$keepAliveHint.Clientbound
+            $relayArguments.ServerboundKeepAliveId = [int]$keepAliveHint.Serverbound
+        }
+        [void](Start-JoinRelay @relayArguments)
     }
 
     $launch = New-MinecraftLaunchArguments -Profile $profile -Runtime $runtime -JavaExe $javaExe `
@@ -396,9 +419,20 @@ try {
 
     if ($useJoinRelay) {
         $clientLog = Join-Path $gameDir 'logs/latest.log'
-        if (-not (Wait-JoinRelayRelease -LogPath $clientLog -HoldSeconds 12 -TimeoutSeconds 180)) {
+        if (-not (Wait-JoinRelayRelease -LogPath $clientLog -HoldSeconds $JoinRelayHoldSeconds -TimeoutSeconds 180)) {
             Write-Warning 'Resource reload marker was not seen; releasing the join relay anyway'
         }
+        # The relay answers keep-alives for the client while the first terrain
+        # render blocks the main thread; wait until it has learned the packet
+        # ids from a real client answer (not needed when a verified fallback
+        # table already provides them).
+        if (-not (Get-JoinRelayKeepAliveIds -McVersion $McVersion)) {
+            $keepAliveDeadline = (Get-Date).AddSeconds(30)
+            while (-not (Test-JoinRelayKeepAliveReady) -and (Get-Date) -lt $keepAliveDeadline) {
+                Start-Sleep -Seconds 2
+            }
+        }
+        Write-Output "Join relay keep-alive ids learned: $(Test-JoinRelayKeepAliveReady)"
         Set-JoinRelayRelease
         Write-Output "Join relay: $(Get-JoinRelayStatus)"
         Start-Sleep -Seconds 5
@@ -415,6 +449,31 @@ try {
     $screenshotsDir = Join-Path $gameDir 'screenshots'
 
     if ($windowHandle -ne [IntPtr]::Zero) {
+        # On slow software rendering the terrain can still be loading right
+        # after the skin profile is reported. Window captures are unreliable
+        # with software OpenGL, so probe with in-game F2 screenshots until the
+        # world is actually visible.
+        $worldReady = $false
+        $worldDeadline = (Get-Date).AddSeconds(150)
+        while ((Get-Date) -lt $worldDeadline) {
+            $probe = Get-MinecraftScreenshot -Handle $windowHandle -Directory $screenshotsDir -TimeoutSeconds 30
+            if ($probe) {
+                try {
+                    if (Test-WorldScreenshot -Path $probe) {
+                        $worldReady = $true
+                        break
+                    }
+                } catch {
+                }
+            }
+            Start-Sleep -Seconds 3
+        }
+        if ($worldReady) {
+            Write-Output 'World is visible.'
+        } else {
+            Write-Warning 'The world did not become visible within 150 seconds; continuing with the screenshots'
+        }
+
         # First F5 press: third person, camera behind the player (cape visible).
         $capeScreenshot = Get-MinecraftScreenshot -Handle $windowHandle -Directory $screenshotsDir `
             -ViewKey 'F5' -TimeoutSeconds $ScreenshotTimeoutSeconds
