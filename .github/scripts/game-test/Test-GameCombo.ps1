@@ -242,6 +242,21 @@ function Copy-ResultArtifacts {
         }
     }
 
+    # Crash reports, hs_err and replay logs explain failures where the client
+    # exits without a readable stack in latest.log.
+    foreach ($pattern in @(
+            @{ Dir = (Join-Path $GameDir 'crash-reports'); Filter = '*.txt' },
+            @{ Dir = $GameDir; Filter = 'hs_err_pid*.log' },
+            @{ Dir = $GameDir; Filter = 'replay_pid*.log' }
+        )) {
+        if (-not (Test-Path -LiteralPath $pattern.Dir)) {
+            continue
+        }
+        foreach ($crashFile in @(Get-ChildItem -LiteralPath $pattern.Dir -Filter $pattern.Filter -File -ErrorAction SilentlyContinue)) {
+            Copy-Item -LiteralPath $crashFile.FullName -Destination (Join-Path $logDir $crashFile.Name) -Force
+        }
+    }
+
     foreach ($screenshotPath in @($Screenshots)) {
         if ($screenshotPath -and (Test-Path -LiteralPath $screenshotPath)) {
             $screenshotDir = Join-Path $ResultDirectory 'screenshots'

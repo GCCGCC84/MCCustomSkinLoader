@@ -492,6 +492,19 @@ function Install-MinecraftRuntime {
     Write-Host "Libraries and client files for Minecraft $($Profile['version']): $($downloads.Count) reference(s)"
     Invoke-McFileDownload -Items $downloads -ThrottleLimit $ThrottleLimit
 
+    # Forge's installertools post-processors (for example DeobfRealms on
+    # 1.14.3) expect the vanilla version JSON next to the client jar.
+    $clientJson = [System.IO.Path]::ChangeExtension($clientJar.Path, '.json')
+    if (-not (Test-Path -LiteralPath $clientJson)) {
+        try {
+            $entry = Get-MinecraftVersionManifestEntry -McVersion ([string]$Profile['version']) -CacheDir $CacheDir
+            $versionJson = Invoke-MetaRequest -Uri $entry.url
+            $versionJson | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $clientJson -Encoding utf8
+        } catch {
+            Write-Warning "Could not write the vanilla version JSON to '$clientJson': $_"
+        }
+    }
+
     $assetItems = Get-MinecraftAssetPlan -AssetIndexFile $assetIndexFile -AssetsDir $assetsDir -SkipSoundAssets:$SkipSoundAssets
     Write-Host "Asset objects for Minecraft $($Profile['version']): $($assetItems.Count) reference(s)"
     Invoke-McFileDownload -Items $assetItems -ThrottleLimit $ThrottleLimit
