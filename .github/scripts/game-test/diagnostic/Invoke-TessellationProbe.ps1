@@ -134,7 +134,7 @@ try {
         $stderr = Read-IfPresent $client.StdErrFile
         $all = $latest + "`n" + $stdout + "`n" + $stderr
         $serverLog = Read-IfPresent $server.LogFile
-        if (-not $seenAtlas -and $all -match 'Created:.*textures/atlas/(particles|mob_effects)') {
+        if (-not $seenAtlas -and $all -match 'Created:.*(textures/atlas/(particles|mob_effects)|textures/(particle|mob_effect)-atlas)') {
             $seenAtlas = $true; $atlasAt = $watch.Elapsed.TotalSeconds
             Record-Event 'final-atlas-observed'
         }
