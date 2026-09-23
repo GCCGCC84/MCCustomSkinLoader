@@ -505,10 +505,24 @@ function Install-MinecraftRuntime {
     if (-not (Test-Path -LiteralPath $clientJson)) {
         try {
             $entry = Get-MinecraftVersionManifestEntry -McVersion ([string]$Profile['version']) -CacheDir $CacheDir
-            $versionJson = Invoke-MetaRequest -Uri $entry.url
+            $versionJson = Invoke-MetaRequest -Uri $entry.Url
             $versionJson | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $clientJson -Encoding utf8
         } catch {
             Write-Warning "Could not write the vanilla version JSON to '$clientJson': $_"
+        }
+    }
+
+    # DeobfRealms resolves its libraries from the client jar path (three parent
+    # hops + "libraries"), which is <libraries>/com/mojang/libraries in the
+    # Prism layout; mirror the Realms artifact into that location.
+    $realmsRoot = Join-Path $librariesDir 'com/mojang/realms'
+    if (Test-Path -LiteralPath $realmsRoot) {
+        foreach ($realmsVersionDir in @(Get-ChildItem -LiteralPath $realmsRoot -Directory -ErrorAction SilentlyContinue)) {
+            $mirrorDir = Join-Path $librariesDir "com/mojang/libraries/com/mojang/realms/$($realmsVersionDir.Name)"
+            New-Item -ItemType Directory -Force -Path $mirrorDir | Out-Null
+            foreach ($realmsJar in @(Get-ChildItem -LiteralPath $realmsVersionDir.FullName -Filter '*.jar' -File -ErrorAction SilentlyContinue)) {
+                Copy-Item -LiteralPath $realmsJar.FullName -Destination (Join-Path $mirrorDir $realmsJar.Name) -Force
+            }
         }
     }
 
