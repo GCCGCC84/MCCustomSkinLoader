@@ -41,7 +41,8 @@ Import-Module (Join-Path $PSScriptRoot 'lib/JoinRelay.psm1') -Force
 
 $requiredCommands = @(
     'Get-MergedLaunchProfile', 'Install-MinecraftRuntime', 'Install-Mesa3D', 'Get-ProcessTreeId',
-    'Test-JoinRelayRequired', 'Start-JoinRelay', 'Set-JoinRelayRelease', 'Stop-JoinRelay', 'Get-FreeTcpPort'
+    'Test-JoinRelayRequired', 'Start-JoinRelay', 'Set-JoinRelayRelease', 'Stop-JoinRelay', 'Get-FreeTcpPort',
+    'Test-JoinRelayKeepAliveReady'
 )
 $missingCommands = @($requiredCommands | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) })
 if ($missingCommands.Count -gt 0) {
@@ -415,6 +416,14 @@ try {
         if (-not (Wait-JoinRelayRelease -LogPath $clientLog -HoldSeconds $JoinRelayHoldSeconds -TimeoutSeconds 180)) {
             Write-Warning 'Resource reload marker was not seen; releasing the join relay anyway'
         }
+        # The relay answers keep-alives for the client while the first terrain
+        # render blocks the main thread; wait until it has learned the packet
+        # ids from a real client answer.
+        $keepAliveDeadline = (Get-Date).AddSeconds(30)
+        while (-not (Test-JoinRelayKeepAliveReady) -and (Get-Date) -lt $keepAliveDeadline) {
+            Start-Sleep -Seconds 2
+        }
+        Write-Output "Join relay keep-alive ids learned: $(Test-JoinRelayKeepAliveReady)"
         Set-JoinRelayRelease
         Write-Output "Join relay: $(Get-JoinRelayStatus)"
         Start-Sleep -Seconds 5
@@ -431,6 +440,13 @@ try {
     $screenshotsDir = Join-Path $gameDir 'screenshots'
 
     if ($windowHandle -ne [IntPtr]::Zero) {
+        # On slow software rendering the terrain can still be loading right
+        # after the skin profile is reported; wait until the world is visible
+        # so the F5 screenshots capture the player instead of the loading screen.
+        if (-not (Wait-WorldScreenshot -Handle $windowHandle -ProbePath (Join-Path $WorkDir 'world-ready.png') -TimeoutSeconds 150)) {
+            Write-Warning 'The world did not become visible within 150 seconds; continuing with the screenshots'
+        }
+
         # First F5 press: third person, camera behind the player (cape visible).
         $capeScreenshot = Get-MinecraftScreenshot -Handle $windowHandle -Directory $screenshotsDir `
             -ViewKey 'F5' -TimeoutSeconds $ScreenshotTimeoutSeconds

@@ -19,6 +19,7 @@ Set-StrictMode -Version 1.0
 
 $script:JoinRelaySource = @'
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -26,11 +27,22 @@ using System.Threading;
 
 public static class CslJoinRelay
 {
+    private sealed class PendingKeepAlive
+    {
+        public long Nonce;
+        public int ClientboundId;
+        public DateTime SeenAt;
+        public bool Acked;
+    }
+
     private sealed class RelayState
     {
         public readonly MemoryStream Held = new MemoryStream();
         public readonly object Gate = new object();
+        public readonly object UpstreamGate = new object();
+        public readonly List<PendingKeepAlive> Pending = new List<PendingKeepAlive>();
         public NetworkStream To;
+        public NetworkStream Upstream;
     }
 
     private static TcpListener listener;
@@ -40,6 +52,9 @@ public static class CslJoinRelay
     private static int heldFrames;
     private static long heldBytes;
     private static int earlyFlushes;
+    private static int keepAliveClientboundId = -1;
+    private static int keepAliveServerboundId = -1;
+    private static int emulatedAcks;
     private static string lastStatus = "idle";
     private static readonly object statusGate = new object();
 
@@ -50,6 +65,9 @@ public static class CslJoinRelay
         heldFrames = 0;
         heldBytes = 0;
         earlyFlushes = 0;
+        keepAliveClientboundId = -1;
+        keepAliveServerboundId = -1;
+        emulatedAcks = 0;
         listener = new TcpListener(IPAddress.Loopback, listenPort);
         listener.Start();
         running = true;
@@ -64,12 +82,18 @@ public static class CslJoinRelay
         released = true;
         SetStatus("released heldFrames=" + Interlocked.CompareExchange(ref heldFrames, 0, 0)
             + " heldBytes=" + Interlocked.Read(ref heldBytes)
-            + " earlyFlushes=" + Interlocked.CompareExchange(ref earlyFlushes, 0, 0));
+            + " earlyFlushes=" + Interlocked.CompareExchange(ref earlyFlushes, 0, 0)
+            + " emulatedAcks=" + Interlocked.CompareExchange(ref emulatedAcks, 0, 0));
     }
 
     public static string GetStatus()
     {
         lock (statusGate) { return lastStatus; }
+    }
+
+    public static bool IsKeepAliveLearned()
+    {
+        return keepAliveClientboundId >= 0 && keepAliveServerboundId >= 0;
     }
 
     public static void Stop()
@@ -118,8 +142,9 @@ public static class CslJoinRelay
 
         var state = new RelayState();
         state.To = client.GetStream();
+        state.Upstream = upstream.GetStream();
 
-        var send = new Thread(() => PumpRaw(client.GetStream(), upstream.GetStream()));
+        var send = new Thread(() => PumpToUpstream(client.GetStream(), upstream.GetStream(), state));
         send.IsBackground = true;
         send.Start();
         var receive = new Thread(() => PumpFramed(upstream.GetStream(), state, threshold));
@@ -130,16 +155,25 @@ public static class CslJoinRelay
         flush.Start();
     }
 
-    private static void PumpRaw(NetworkStream from, NetworkStream to)
+    private static void PumpToUpstream(NetworkStream from, NetworkStream to, RelayState state)
     {
-        var buffer = new byte[65536];
         try
         {
-            int read;
-            while ((read = from.Read(buffer, 0, buffer.Length)) > 0)
+            while (true)
             {
-                to.Write(buffer, 0, read);
-                to.Flush();
+                int length = ReadVarInt(from);
+                if (length < 0) break;
+                var frame = new byte[length];
+                if (length > 0 && !ReadExact(from, frame, length)) break;
+
+                LearnKeepAliveAck(state, frame, length);
+
+                lock (state.UpstreamGate)
+                {
+                    WriteVarInt(to, length);
+                    if (length > 0) to.Write(frame, 0, length);
+                    to.Flush();
+                }
             }
         }
         catch { }
@@ -156,6 +190,8 @@ public static class CslJoinRelay
                 if (length < 0) break;
                 var frame = new byte[length];
                 if (length > 0 && !ReadExact(from, frame, length)) break;
+
+                RegisterKeepAlive(state, frame, length);
 
                 lock (state.Gate)
                 {
@@ -188,6 +224,55 @@ public static class CslJoinRelay
         try { state.To.Close(); } catch { }
     }
 
+    private static void RegisterKeepAlive(RelayState state, byte[] payload, int length)
+    {
+        // Clientbound keep-alive: packet id VarInt followed by a long nonce.
+        if (length < 9 || length > 10) return;
+        int id = ReadVarIntFromBytes(payload, length, out int idBytes);
+        if (id < 0 || idBytes < 1 || length - idBytes != 8) return;
+
+        int known = keepAliveClientboundId;
+        if (known >= 0 && id != known) return;
+
+        long nonce = ReadInt64(payload, length - 8);
+        lock (state.Gate)
+        {
+            var entry = state.Pending.Find(p => p.Nonce == nonce);
+            if (entry == null)
+            {
+                if (known < 0 && state.Pending.Count >= 8) return;
+                state.Pending.Add(new PendingKeepAlive { Nonce = nonce, ClientboundId = id, SeenAt = DateTime.UtcNow });
+            }
+            else
+            {
+                entry.SeenAt = DateTime.UtcNow;
+            }
+        }
+    }
+
+    private static void LearnKeepAliveAck(RelayState state, byte[] payload, int length)
+    {
+        // The client answers a keep-alive with the same long nonce; the matching
+        // pair proves the packet ids in both directions.
+        if (length < 9 || length > 10) return;
+        int id = ReadVarIntFromBytes(payload, length, out int idBytes);
+        if (id < 0 || idBytes < 1 || length - idBytes != 8) return;
+
+        long nonce = ReadInt64(payload, length - 8);
+        lock (state.Gate)
+        {
+            var entry = state.Pending.Find(p => p.Nonce == nonce);
+            if (entry == null) return;
+            entry.Acked = true;
+            if (keepAliveServerboundId < 0 || keepAliveClientboundId < 0)
+            {
+                keepAliveClientboundId = entry.ClientboundId;
+                keepAliveServerboundId = id;
+                state.Pending.RemoveAll(p => p.Nonce != nonce);
+            }
+        }
+    }
+
     private static void FlushLoop(RelayState state)
     {
         while (running)
@@ -202,9 +287,37 @@ public static class CslJoinRelay
                         state.To.Flush();
                     }
                 }
+                EmulateKeepAlives(state);
             }
             catch { return; }
             Thread.Sleep(200);
+        }
+    }
+
+    private static void EmulateKeepAlives(RelayState state)
+    {
+        int serverbound = keepAliveServerboundId;
+        if (serverbound < 0 || state.Upstream == null) return;
+        lock (state.Gate)
+        {
+            foreach (var pending in state.Pending)
+            {
+                if (pending.Acked) continue;
+                if ((DateTime.UtcNow - pending.SeenAt).TotalSeconds < 10) continue;
+                // The client main thread can be busy with the first terrain
+                // render for longer than the server's keep-alive timeout; answer
+                // on its behalf so the server does not kick it.
+                lock (state.UpstreamGate)
+                {
+                    WriteVarInt(state.Upstream, 9);
+                    WriteVarInt(state.Upstream, serverbound);
+                    WriteInt64(state.Upstream, pending.Nonce);
+                    state.Upstream.Flush();
+                }
+                Interlocked.Increment(ref emulatedAcks);
+                pending.Acked = true;
+            }
+            state.Pending.RemoveAll(p => p.Acked && (DateTime.UtcNow - p.SeenAt).TotalSeconds > 60);
         }
     }
 
@@ -262,6 +375,38 @@ public static class CslJoinRelay
         }
         return true;
     }
+
+    private static int ReadVarIntFromBytes(byte[] buffer, int length, out int bytesRead)
+    {
+        bytesRead = 0;
+        int result = 0;
+        for (int i = 0; i < 5 && i < length; i++)
+        {
+            int b = buffer[i];
+            bytesRead = i + 1;
+            result |= (b & 0x7F) << (7 * i);
+            if ((b & 0x80) == 0) return result;
+        }
+        return -1;
+    }
+
+    private static long ReadInt64(byte[] buffer, int offset)
+    {
+        long value = 0;
+        for (int i = 0; i < 8; i++)
+        {
+            value = (value << 8) | buffer[offset + i];
+        }
+        return value;
+    }
+
+    private static void WriteInt64(Stream stream, long value)
+    {
+        for (int i = 7; i >= 0; i--)
+        {
+            stream.WriteByte((byte)((value >> (8 * i)) & 0xFF));
+        }
+    }
 }
 '@
 
@@ -277,14 +422,17 @@ function Test-JoinRelayRequired {
         [Parameter(Mandatory)][string]$Loader
     )
 
-    # Forge patches Minecraft to open the initial screen after the first
-    # resource reload (MC-145102), Fabric/Quilt do not. The early connect
-    # ordering itself only exists in 1.14-1.16.5; 1.17.0 crashes before the
-    # connection is even attempted (MC-228828), and 1.17.1+ is fixed.
-    if ($Loader -in @('forge', 'neoforge')) {
+    # 1.13.2-1.20.1 use the --server auto-connect; the client can reach the
+    # world before its first resource reload and terrain pass are done and can
+    # be kicked by the server while the main thread is busy. The relay holds
+    # the world data until the harness sees the reload finish and answers
+    # keep-alives on the client's behalf (MC-145102 and friends). 1.17.0
+    # crashes before the connection is even attempted (MC-228828) and 1.20.2+
+    # uses quick play.
+    if ($McVersion -eq '1.17') {
         return $false
     }
-    return ($McVersion -match '^1\.(14|15|16)(\.\d+)?$')
+    return ($McVersion -match '^1\.(13|14|15|16|17|18|19|20)(\.\d+)?$' -and $McVersion -notmatch '^1\.20\.[2-9]')
 }
 
 function Get-FreeTcpPort {
@@ -323,6 +471,13 @@ function Get-JoinRelayStatus {
         return 'not started'
     }
     return [CslJoinRelay]::GetStatus()
+}
+
+function Test-JoinRelayKeepAliveReady {
+    if (-not ('CslJoinRelay' -as [type])) {
+        return $false
+    }
+    return [CslJoinRelay]::IsKeepAliveLearned()
 }
 
 function Stop-JoinRelay {

@@ -311,3 +311,70 @@ function Test-SkinScreenshot {
     }
 }
 
+
+function Test-WorldScreenshot {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [int]$MinSkyRatio = 0.35
+    )
+
+    # The "Loading terrain" and other loading screens use the dark title
+    # background; a rendered world shows sky in the upper part of the frame.
+    Add-Type -AssemblyName System.Drawing
+    $bitmap = [System.Drawing.Bitmap]::FromFile($Path)
+    try {
+        $width = $bitmap.Width
+        $height = $bitmap.Height
+        if ($width -le 0 -or $height -le 0) {
+            return $false
+        }
+
+        $stepX = [Math]::Max(1, [int]($width / 24))
+        $stepY = [Math]::Max(1, [int]($height / 12))
+        $samples = 0
+        $sky = 0
+        for ($x = 0; $x -lt $width; $x += $stepX) {
+            for ($y = 0; $y -lt [int]($height / 3); $y += $stepY) {
+                $color = $bitmap.GetPixel($x, $y)
+                $samples++
+                if ($color.B -gt 150 -and $color.B -gt ($color.R + 40) -and $color.B -gt ($color.G + 10)) {
+                    $sky++
+                }
+            }
+        }
+        if ($samples -eq 0) {
+            return $false
+        }
+        return (($sky / $samples) -ge $MinSkyRatio)
+    } finally {
+        $bitmap.Dispose()
+    }
+}
+
+function Wait-WorldScreenshot {
+    param(
+        [Parameter(Mandatory)][IntPtr]$Handle,
+        [Parameter(Mandatory)][string]$ProbePath,
+        [int]$TimeoutSeconds = 120,
+        [int]$IntervalSeconds = 4
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds $IntervalSeconds
+        try {
+            [void](Save-WindowScreenshot -Handle $Handle -Path $ProbePath)
+        } catch {
+            continue
+        }
+        if (Test-Path -LiteralPath $ProbePath) {
+            try {
+                if (Test-WorldScreenshot -Path $ProbePath) {
+                    return $true
+                }
+            } catch {
+            }
+        }
+    }
+    return $false
+}
