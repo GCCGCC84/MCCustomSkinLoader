@@ -433,6 +433,13 @@ function Install-MinecraftRuntime {
 
     New-Item -ItemType Directory -Force -Path $librariesDir, $assetsDir, $loggingDir, $nativesDir | Out-Null
 
+    # Forge 1.14.3's DEOBF_REALMS installertools task derives its default
+    # library root from the client jar path (three parent hops + "libraries").
+    # With the Prism layout that resolves to <libraries>/com/mojang/libraries;
+    # creating it lets the task scan nothing and skip the Realms deobfuscation
+    # instead of failing with "Missing required Library Directory".
+    New-Item -ItemType Directory -Force -Path (Join-Path $librariesDir 'com/mojang/libraries') | Out-Null
+
     $libraryPlan = Get-MinecraftLibraryPlan -Libraries @($Profile['libraries'])
     $libraryArtifacts = @($libraryPlan | Where-Object { $_.Kind -eq 'artifact' })
     $libraryNatives = @($libraryPlan | Where-Object { $_.Kind -eq 'natives' })

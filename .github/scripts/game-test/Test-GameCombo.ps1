@@ -441,9 +441,27 @@ try {
 
     if ($windowHandle -ne [IntPtr]::Zero) {
         # On slow software rendering the terrain can still be loading right
-        # after the skin profile is reported; wait until the world is visible
-        # so the F5 screenshots capture the player instead of the loading screen.
-        if (-not (Wait-WorldScreenshot -Handle $windowHandle -ProbePath (Join-Path $WorkDir 'world-ready.png') -TimeoutSeconds 150)) {
+        # after the skin profile is reported. Window captures are unreliable
+        # with software OpenGL, so probe with in-game F2 screenshots until the
+        # world is actually visible.
+        $worldReady = $false
+        $worldDeadline = (Get-Date).AddSeconds(150)
+        while ((Get-Date) -lt $worldDeadline) {
+            $probe = Get-MinecraftScreenshot -Handle $windowHandle -Directory $screenshotsDir -TimeoutSeconds 30
+            if ($probe) {
+                try {
+                    if (Test-WorldScreenshot -Path $probe) {
+                        $worldReady = $true
+                        break
+                    }
+                } catch {
+                }
+            }
+            Start-Sleep -Seconds 3
+        }
+        if ($worldReady) {
+            Write-Output 'World is visible.'
+        } else {
             Write-Warning 'The world did not become visible within 150 seconds; continuing with the screenshots'
         }
 

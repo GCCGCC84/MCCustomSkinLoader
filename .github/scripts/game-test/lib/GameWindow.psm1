@@ -351,30 +351,5 @@ function Test-WorldScreenshot {
     }
 }
 
-function Wait-WorldScreenshot {
-    param(
-        [Parameter(Mandatory)][IntPtr]$Handle,
-        [Parameter(Mandatory)][string]$ProbePath,
-        [int]$TimeoutSeconds = 120,
-        [int]$IntervalSeconds = 4
-    )
 
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        Start-Sleep -Seconds $IntervalSeconds
-        try {
-            [void](Save-WindowScreenshot -Handle $Handle -Path $ProbePath)
-        } catch {
-            continue
-        }
-        if (Test-Path -LiteralPath $ProbePath) {
-            try {
-                if (Test-WorldScreenshot -Path $ProbePath) {
-                    return $true
-                }
-            } catch {
-            }
-        }
-    }
-    return $false
-}
+
