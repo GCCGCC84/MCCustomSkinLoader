@@ -1,0 +1,84 @@
+name: Game Join Diagnostic
+
+on:
+  push:
+    branches: ['diagnostic/game-test-fixes-35855058233']
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: game-join-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: ${{ matrix.mc }}-${{ matrix.loader }}-${{ matrix.mode }}
+    runs-on: windows-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        include:
+          - {mc: '1.17', loader: fabric, loader_version: '0.19.5', mode: immediate-with-csl, mod: true, deferred: false, quilt_system_libraries: false, java: '17'}
+          - {mc: '1.17', loader: fabric, loader_version: '0.19.5', mode: immediate-without-csl, mod: false, deferred: false, quilt_system_libraries: false, java: '17'}
+          - {mc: '1.17', loader: fabric, loader_version: '0.19.5', mode: deferred-with-csl, mod: true, deferred: true, quilt_system_libraries: false, java: '17'}
+          - {mc: '1.17.1', loader: quilt, loader_version: '0.30.1', mode: deferred-system-libraries, mod: true, deferred: true, quilt_system_libraries: true, java: '17'}
+          - {mc: '1.18.2', loader: quilt, loader_version: '0.30.1', mode: deferred-with-csl, mod: true, deferred: true, quilt_system_libraries: false, java: '17'}
+          - {mc: '1.15.1', loader: forge, loader_version: '30.0.51', mode: deferred-with-csl, mod: true, deferred: true, quilt_system_libraries: false, java: '8.0.302'}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+      - name: Download tested mod
+        uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: 35943954080
+          name: CustomSkinLoader-GameTest-17
+          path: artifact
+      - uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/shared-cache
+          key: mc-shared-win-3e69a0388e85-v1
+          restore-keys: |
+            mc-shared-win-
+      - uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/mesa-cache
+          key: mesa3d-msvc-26.2.0
+      - name: Run focused diagnostic
+        shell: pwsh
+        env:
+          MC_VERSION: ${{ matrix.mc }}
+          LOADER: ${{ matrix.loader }}
+          LOADER_VERSION: ${{ matrix.loader_version }}
+          PROBE_MODE: ${{ matrix.mode }}
+          WITH_CSL: ${{ matrix.mod }}
+          DEFERRED_JOIN: ${{ matrix.deferred }}
+          QUILT_SYSTEM_LIBRARIES: ${{ matrix.quilt_system_libraries }}
+        run: |
+          $jar = Get-ChildItem artifact -Recurse -Filter '*.jar' |
+            Where-Object { $_.Name -notlike '*-sources.jar' } | Select-Object -First 1
+          if (-not $jar) { throw 'Tested mod artifact missing' }
+          & ./.github/scripts/game-test/diagnostic/Invoke-TessellationProbe.ps1 `
+            -McVersion $env:MC_VERSION -Loader $env:LOADER -LoaderVersion $env:LOADER_VERSION `
+            -Mode $env:PROBE_MODE -WithCsl:($env:WITH_CSL -eq 'true') `
+            -DeferredJoin:($env:DEFERRED_JOIN -eq 'true') `
+            -QuiltSystemLibraries:($env:QUILT_SYSTEM_LIBRARIES -eq 'true') `
+            -ModJar $jar.FullName -JavaHome $env:JAVA_HOME `
+            -CacheDir "$env:RUNNER_TEMP/shared-cache" -MesaCacheDir "$env:RUNNER_TEMP/mesa-cache" `
+            -WorkDir "$env:RUNNER_TEMP/probe" -ResultDir diagnostic-results -ObserveSeconds 90
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: game-join-${{ matrix.mc }}-${{ matrix.loader }}-${{ matrix.mode }}
+          path: diagnostic-results/
+          include-hidden-files: true
+          retention-days: 14
+          if-no-files-found: warn
