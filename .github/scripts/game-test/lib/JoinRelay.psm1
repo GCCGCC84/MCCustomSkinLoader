@@ -470,19 +470,15 @@ function Test-JoinRelayRequired {
         [Parameter(Mandatory)][string]$Loader
     )
 
-    # Forge patches Minecraft to open the initial screen after the first
-    # resource reload, so the relay is only needed for Fabric and Quilt.
-    if ($Loader -in @('forge', 'neoforge')) {
-        return $false
-    }
-
     # 1.13.2-1.20.1 use the --server auto-connect; the client can reach the
     # world before its first resource reload and terrain pass are done and can
     # be kicked by the server while the main thread is busy. The relay holds
     # the world data until the harness sees the reload finish and answers
     # keep-alives on the client's behalf (MC-145102 and friends). 1.17.0
     # crashes before the connection is even attempted (MC-228828) and 1.20.2+
-    # uses quick play.
+    # uses quick play. Forge 1.14.3-1.15.x needs the relay as well: without it
+    # the client drops the connection before CustomSkinLoader loads its profile
+    # (see the full run 36023872722).
     if ($McVersion -eq '1.17') {
         return $false
     }

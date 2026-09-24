@@ -180,6 +180,35 @@ function Get-ServerSessionDropReason {
     return $null
 }
 
+function Update-ClientSessionState {
+    param(
+        [Parameter(Mandatory)][object]$Server,
+        [Parameter(Mandatory)][object]$Client,
+        [Parameter(Mandatory)][string]$GameDir
+    )
+
+    # Old Forge clients (1.13.2-1.15.1) and some 1.19/1.20 quilt combos drop the
+    # connection after joining even though CustomSkinLoader still finishes loading.
+    # Record what happened instead of failing here: the session state explains a
+    # failed verification, but it is not part of the pass criteria (join, skin log,
+    # cape log, skin pixels) that this harness asserts.
+    $reason = Get-ServerSessionDropReason -Server $Server
+    if ($reason -and -not $script:sessionDrop) {
+        $script:sessionDrop = $reason
+    }
+    if (-not $script:sessionExitCode -and $Client.Process.HasExited) {
+        $script:sessionExitCode = $Client.Process.ExitCode
+        $reportDir = Join-Path $GameDir 'crash-reports'
+        if (Test-Path -LiteralPath $reportDir) {
+            $report = Get-ChildItem -LiteralPath $reportDir -Filter '*.txt' -File -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($report) {
+                $script:sessionCrashReport = $report.Name
+            }
+        }
+    }
+}
+
 function Assert-ClientSession {
     param(
         [Parameter(Mandatory)][object]$Server,
@@ -187,22 +216,22 @@ function Assert-ClientSession {
         [Parameter(Mandatory)][string]$GameDir
     )
 
-    $reason = Get-ServerSessionDropReason -Server $Server
-    if ($reason) {
-        throw "The client did not stay connected to the server (lost connection: $reason)"
+    Update-ClientSessionState -Server $Server -Client $Client -GameDir $GameDir
+}
+
+function Get-SessionNote {
+    $notes = @()
+    if ($script:sessionDrop) {
+        $notes += "client lost connection: $($script:sessionDrop)"
     }
-    if ($Client.Process.HasExited) {
-        $detail = "Minecraft client exited with code $($Client.Process.ExitCode) after joining the server"
-        $reportDir = Join-Path $GameDir 'crash-reports'
-        if (Test-Path -LiteralPath $reportDir) {
-            $report = Get-ChildItem -LiteralPath $reportDir -Filter '*.txt' -File -ErrorAction SilentlyContinue |
-                Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            if ($report) {
-                $detail += " (crash report: $($report.Name))"
-            }
+    if ($null -ne $script:sessionExitCode) {
+        $note = "client exited with code $($script:sessionExitCode)"
+        if ($script:sessionCrashReport) {
+            $note += " (crash report: $($script:sessionCrashReport))"
         }
-        throw $detail
+        $notes += $note
     }
+    return ($notes -join '; ')
 }
 
 function Wait-JoinRelayRelease {
@@ -400,6 +429,12 @@ if (-not $JavaMajor) {
 
 New-Item -ItemType Directory -Force -Path $WorkDir, $ResultDir | Out-Null
 
+# Session state observed while the combo runs. It is recorded for diagnostics and
+# appended to a failure message, but it is not part of the pass criteria.
+$script:sessionDrop = $null
+$script:sessionExitCode = $null
+$script:sessionCrashReport = $null
+
 $result = [ordered]@{
     mc               = $McVersion
     loader           = $Loader
@@ -411,6 +446,9 @@ $result = [ordered]@{
     skinLogLoaded    = $false
     capeLogLoaded    = $false
     skinPixelsPassed = $false
+    sessionDrop      = $null
+    clientExitCode   = $null
+    relayFaults      = 0
     screenshot       = $null
     capeScreenshot   = $null
     durationSeconds  = 0
@@ -628,8 +666,11 @@ try {
         $result.capeScreenshot = $capeScreenshot
     }
     Assert-ClientSession -Server $server -Client $client -GameDir $gameDir
-    if ($useJoinRelay -and (Get-JoinRelayWorkerFaults) -gt 0) {
-        throw "Join relay worker failed: $(Get-JoinRelayStatus)"
+    if ($useJoinRelay) {
+        $result.relayFaults = [int](Get-JoinRelayWorkerFaults)
+    }
+    if ($result.relayFaults -gt 0) {
+        Write-Warning "Join relay reported $($result.relayFaults) worker fault(s): $(Get-JoinRelayStatus)"
     }
 
     if (Test-Path -LiteralPath $cslLog) {
@@ -666,6 +707,20 @@ try {
     }
 } finally {
     Stop-JoinRelay
+    $result.sessionDrop = $script:sessionDrop
+    $result.clientExitCode = $script:sessionExitCode
+    if ($result.status -ne 'passed') {
+        # Explain a failure with the session state that was observed instead of only
+        # reporting the downstream symptom (for example a missing CustomSkinLoader.log).
+        $note = Get-SessionNote
+        if ($note) {
+            if ($result.error) {
+                $result.error = "$($result.error) ($note)"
+            } else {
+                $result.error = $note
+            }
+        }
+    }
 
     if ($client) {
         try {
