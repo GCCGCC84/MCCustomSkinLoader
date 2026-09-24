@@ -58,6 +58,7 @@ public static class CslJoinRelay
     private static int hintClientboundId = -1;
     private static int hintServerboundId = -1;
     private static int emulatedAcks;
+    private static int workerFaults;
     private static string lastStatus = "idle";
     private static readonly object statusGate = new object();
 
@@ -73,6 +74,7 @@ public static class CslJoinRelay
         hintClientboundId = hintClientbound;
         hintServerboundId = hintServerbound;
         emulatedAcks = 0;
+        workerFaults = 0;
         listener = new TcpListener(IPAddress.Loopback, listenPort);
         listener.Start();
         running = true;
@@ -95,8 +97,14 @@ public static class CslJoinRelay
             + " heldBytes=" + Interlocked.Read(ref heldBytes)
             + " earlyFlushes=" + Interlocked.CompareExchange(ref earlyFlushes, 0, 0)
             + " emulatedAcks=" + Interlocked.CompareExchange(ref emulatedAcks, 0, 0)
+            + " workerFaults=" + Interlocked.CompareExchange(ref workerFaults, 0, 0)
             + " keepAlive=" + FormatId(keepAliveClientboundId >= 0 ? keepAliveClientboundId : hintClientboundId)
             + "/" + FormatId(keepAliveServerboundId >= 0 ? keepAliveServerboundId : hintServerboundId));
+    }
+
+    public static int GetWorkerFaults()
+    {
+        return Interlocked.CompareExchange(ref workerFaults, 0, 0);
     }
 
     public static string GetStatus()
@@ -132,38 +140,53 @@ public static class CslJoinRelay
             TcpClient client;
             try { client = listener.AcceptTcpClient(); }
             catch { break; }
-            client.NoDelay = true;
-            var thread = new Thread(() => Handle(client, upstreamPort, threshold));
+            try { client.NoDelay = true; } catch { }
+            var thread = new Thread(() => Guard(() => Handle(client, upstreamPort, threshold)));
             thread.IsBackground = true;
             thread.Start();
+        }
+    }
+
+    private static void Guard(Action body)
+    {
+        try { body(); }
+        catch (Exception error)
+        {
+            Interlocked.Increment(ref workerFaults);
+            SetStatus("worker fault: " + error.GetType().Name + ": " + error.Message);
         }
     }
 
     private static void Handle(TcpClient client, int upstreamPort, int threshold)
     {
         var upstream = new TcpClient();
+        NetworkStream clientStream;
+        NetworkStream upstreamStream;
         try
         {
             upstream.NoDelay = true;
             upstream.Connect(IPAddress.Loopback, upstreamPort);
+            clientStream = client.GetStream();
+            upstreamStream = upstream.GetStream();
         }
         catch
         {
             try { client.Close(); } catch { }
+            try { upstream.Close(); } catch { }
             return;
         }
 
         var state = new RelayState();
-        state.To = client.GetStream();
-        state.Upstream = upstream.GetStream();
+        state.To = clientStream;
+        state.Upstream = upstreamStream;
 
-        var send = new Thread(() => PumpToUpstream(client.GetStream(), upstream.GetStream(), state));
+        var send = new Thread(() => Guard(() => PumpToUpstream(clientStream, upstreamStream, state)));
         send.IsBackground = true;
         send.Start();
-        var receive = new Thread(() => PumpFramed(upstream.GetStream(), state, threshold));
+        var receive = new Thread(() => Guard(() => PumpFramed(upstreamStream, state, threshold)));
         receive.IsBackground = true;
         receive.Start();
-        var flush = new Thread(() => FlushLoop(state));
+        var flush = new Thread(() => Guard(() => FlushLoop(state)));
         flush.IsBackground = true;
         flush.Start();
     }
@@ -519,6 +542,13 @@ function Get-JoinRelayStatus {
         return 'not started'
     }
     return [CslJoinRelay]::GetStatus()
+}
+
+function Get-JoinRelayWorkerFaults {
+    if (-not ('CslJoinRelay' -as [type])) {
+        return 0
+    }
+    return [CslJoinRelay]::GetWorkerFaults()
 }
 
 function Test-JoinRelayKeepAliveReady {

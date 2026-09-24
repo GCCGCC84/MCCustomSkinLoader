@@ -12,6 +12,7 @@ name: Game Test
 
 on:
   push:
+    branches-ignore: ['diagnostic/**']
   pull_request:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
@@ -22,6 +23,10 @@ on:
         default: ''
       loaders:
         description: 'Comma-separated loaders (fabric,forge,neoforge,quilt; empty = all supported)'
+        required: false
+        default: ''
+      pairs:
+        description: 'Optional comma-separated mc:loader pairs; overrides broad version/loader selection'
         required: false
         default: ''
       max_parallel:
@@ -76,6 +81,7 @@ jobs:
           ./.github/scripts/game-test/Get-GameTestMatrix.ps1 `
             -GameVersions '${{ github.event.inputs.game_versions }}' `
             -Loaders '${{ github.event.inputs.loaders }}' `
+            -Pairs '${{ github.event.inputs.pairs }}' `
             -CacheDir '${{ runner.temp }}/csl-matrix-cache' `
             -SkipSoundAssets:$skipSounds
 
@@ -256,7 +262,7 @@ jobs:
 
   report:
     name: Report
-    needs: [test]
+    needs: [prepare, test]
     if: always()
     runs-on: windows-latest
     steps:
@@ -271,4 +277,6 @@ jobs:
 
       - name: Merge results
         shell: pwsh
-        run: ./.github/scripts/game-test/Merge-GameTestResults.ps1 -ResultsDir test-results
+        env:
+          EXPECTED_MATRIX: ${{ needs.prepare.outputs.matrix }}
+        run: ./.github/scripts/game-test/Merge-GameTestResults.ps1 -ResultsDir test-results -ExpectedMatrixJson $env:EXPECTED_MATRIX

@@ -42,7 +42,7 @@ Import-Module (Join-Path $PSScriptRoot 'lib/JoinRelay.psm1') -Force
 $requiredCommands = @(
     'Get-MergedLaunchProfile', 'Install-MinecraftRuntime', 'Install-Mesa3D', 'Get-ProcessTreeId',
     'Test-JoinRelayRequired', 'Start-JoinRelay', 'Set-JoinRelayRelease', 'Stop-JoinRelay', 'Get-FreeTcpPort',
-    'Test-JoinRelayKeepAliveReady', 'Get-JoinRelayKeepAliveIds'
+    'Test-JoinRelayKeepAliveReady', 'Get-JoinRelayKeepAliveIds', 'Get-JoinRelayWorkerFaults'
 )
 $missingCommands = @($requiredCommands | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) })
 if ($missingCommands.Count -gt 0) {
@@ -122,9 +122,61 @@ function Wait-ServerJoin {
     return $false
 }
 
+function Get-ServerSessionDropReason {
+    param([Parameter(Mandatory)][object]$Server)
+
+    if (-not $Server.LogFile -or -not (Test-Path -LiteralPath $Server.LogFile)) {
+        return $null
+    }
+    $lines = @(Get-Content -LiteralPath $Server.LogFile -ErrorAction SilentlyContinue)
+    $lastJoin = -1
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        if ($lines[$index] -match 'joined the game') {
+            $lastJoin = $index
+        }
+    }
+    if ($lastJoin -lt 0) {
+        return $null
+    }
+    for ($index = $lastJoin + 1; $index -lt $lines.Count; $index++) {
+        if ($lines[$index] -match 'lost connection: (.+)') {
+            return $Matches[1].Trim()
+        }
+    }
+    return $null
+}
+
+function Assert-ClientSession {
+    param(
+        [Parameter(Mandatory)][object]$Server,
+        [Parameter(Mandatory)][object]$Client,
+        [Parameter(Mandatory)][string]$GameDir
+    )
+
+    $reason = Get-ServerSessionDropReason -Server $Server
+    if ($reason) {
+        throw "The client did not stay connected to the server (lost connection: $reason)"
+    }
+    if ($Client.Process.HasExited) {
+        $detail = "Minecraft client exited with code $($Client.Process.ExitCode) after joining the server"
+        $reportDir = Join-Path $GameDir 'crash-reports'
+        if (Test-Path -LiteralPath $reportDir) {
+            $report = Get-ChildItem -LiteralPath $reportDir -Filter '*.txt' -File -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($report) {
+                $detail += " (crash report: $($report.Name))"
+            }
+        }
+        throw $detail
+    }
+}
+
 function Wait-JoinRelayRelease {
     param(
         [Parameter(Mandatory)][string]$LogPath,
+        [Parameter(Mandatory)][object]$Server,
+        [Parameter(Mandatory)][object]$Client,
+        [Parameter(Mandatory)][string]$GameDir,
         [int]$HoldSeconds = 12,
         [int]$TimeoutSeconds = 180
     )
@@ -137,6 +189,7 @@ function Wait-JoinRelayRelease {
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $atlasSeenAt = $null
     while ((Get-Date) -lt $deadline) {
+        Assert-ClientSession -Server $Server -Client $Client -GameDir $GameDir
         if (Test-Path -LiteralPath $LogPath) {
             $content = Get-Content -LiteralPath $LogPath -Raw -ErrorAction SilentlyContinue
             if ($null -ne $content -and $content -match 'Created: .*atlas') {
@@ -155,11 +208,15 @@ function Wait-JoinRelayRelease {
 function Wait-SkinProfileLoaded {
     param(
         [Parameter(Mandatory)][string]$LogPath,
+        [Parameter(Mandatory)][object]$Server,
+        [Parameter(Mandatory)][object]$Client,
+        [Parameter(Mandatory)][string]$GameDir,
         [int]$TimeoutSeconds = 60
     )
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
+        Assert-ClientSession -Server $Server -Client $Client -GameDir $GameDir
         if (Test-Path -LiteralPath $LogPath) {
             $content = Get-Content -LiteralPath $LogPath -Raw -ErrorAction SilentlyContinue
             if ($content -match "'s profile loaded\.") {
@@ -419,7 +476,8 @@ try {
 
     if ($useJoinRelay) {
         $clientLog = Join-Path $gameDir 'logs/latest.log'
-        if (-not (Wait-JoinRelayRelease -LogPath $clientLog -HoldSeconds $JoinRelayHoldSeconds -TimeoutSeconds 180)) {
+        if (-not (Wait-JoinRelayRelease -LogPath $clientLog -Server $server -Client $client -GameDir $gameDir `
+                -HoldSeconds $JoinRelayHoldSeconds -TimeoutSeconds 180)) {
             Write-Warning 'Resource reload marker was not seen; releasing the join relay anyway'
         }
         # The relay answers keep-alives for the client while the first terrain
@@ -429,6 +487,7 @@ try {
         if (-not (Get-JoinRelayKeepAliveIds -McVersion $McVersion)) {
             $keepAliveDeadline = (Get-Date).AddSeconds(30)
             while (-not (Test-JoinRelayKeepAliveReady) -and (Get-Date) -lt $keepAliveDeadline) {
+                Assert-ClientSession -Server $server -Client $client -GameDir $gameDir
                 Start-Sleep -Seconds 2
             }
         }
@@ -437,12 +496,14 @@ try {
         Write-Output "Join relay: $(Get-JoinRelayStatus)"
         Start-Sleep -Seconds 5
     }
+    Assert-ClientSession -Server $server -Client $client -GameDir $gameDir
 
     # Wait until CustomSkinLoader has applied a profile (and give the world a
     # moment to render) before taking the screenshots.
     $cslLog = Join-Path $gameDir 'CustomSkinLoader/CustomSkinLoader.log'
-    [void](Wait-SkinProfileLoaded -LogPath $cslLog -TimeoutSeconds 60)
+    [void](Wait-SkinProfileLoaded -LogPath $cslLog -Server $server -Client $client -GameDir $gameDir -TimeoutSeconds 60)
     Start-Sleep -Seconds 3
+    Assert-ClientSession -Server $server -Client $client -GameDir $gameDir
 
     $processIds = Get-ProcessTreeId -RootId $client.Process.Id
     $windowHandle = Get-GameWindow -ProcessIds $processIds -TitleLike 'Minecraft' -TimeoutSeconds $WindowTimeoutSeconds
@@ -456,7 +517,9 @@ try {
         $worldReady = $false
         $worldDeadline = (Get-Date).AddSeconds(150)
         while ((Get-Date) -lt $worldDeadline) {
+            Assert-ClientSession -Server $server -Client $client -GameDir $gameDir
             $probe = Get-MinecraftScreenshot -Handle $windowHandle -Directory $screenshotsDir -TimeoutSeconds 30
+            Assert-ClientSession -Server $server -Client $client -GameDir $gameDir
             if ($probe) {
                 try {
                     if (Test-WorldScreenshot -Path $probe) {
@@ -512,6 +575,10 @@ try {
     if ($capeScreenshot) {
         $result.capeScreenshot = $capeScreenshot
     }
+    Assert-ClientSession -Server $server -Client $client -GameDir $gameDir
+    if ($useJoinRelay -and (Get-JoinRelayWorkerFaults) -gt 0) {
+        throw "Join relay worker failed: $(Get-JoinRelayStatus)"
+    }
 
     if (Test-Path -LiteralPath $cslLog) {
         $cslContent = Get-Content -LiteralPath $cslLog -Raw
@@ -524,7 +591,9 @@ try {
             $result.error = 'CustomSkinLoader.log does not report a loaded local cape'
         }
     } else {
-        $result.error = "CustomSkinLoader.log was not created at '$cslLog'"
+        if (-not $result.error) {
+            $result.error = "CustomSkinLoader.log was not created at '$cslLog'"
+        }
     }
 
     if ($result.joined -and $result.skinLogLoaded -and $result.capeLogLoaded -and $result.skinPixelsPassed) {

@@ -3,7 +3,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$ResultsDir,
-    [string]$SummaryFile
+    [string]$SummaryFile,
+    [string]$ExpectedMatrixJson
 )
 
 Set-StrictMode -Version 1.0
@@ -24,15 +25,43 @@ function Get-VersionSortKey {
 
 $loaderOrder = @{ 'fabric' = 1; 'forge' = 2; 'neoforge' = 3; 'quilt' = 4 }
 
+$expected = @{}
+if ($ExpectedMatrixJson) {
+    $matrix = $ExpectedMatrixJson | ConvertFrom-Json
+    foreach ($job in @($matrix.include)) {
+        foreach ($loader in @(([string]$job.loaders | ConvertFrom-Json))) {
+            $key = "$($job.mc):$($loader.name)"
+            if ($expected.ContainsKey($key)) {
+                throw "Duplicate expected game test combination: $key"
+            }
+            $expected[$key] = [pscustomobject]@{
+                mc            = [string]$job.mc
+                loader        = [string]$loader.name
+                loaderVersion = [string]$loader.version
+            }
+        }
+    }
+}
+
 $resultFiles = @()
 if (Test-Path -LiteralPath $ResultsDir) {
     $resultFiles = @(Get-ChildItem -LiteralPath $ResultsDir -Recurse -Filter 'result.json' -File -ErrorAction SilentlyContinue)
 }
 
 $rows = @()
+$seen = @{}
 foreach ($file in $resultFiles) {
     try {
         $result = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
+        $key = "$($result.mc):$($result.loader)"
+        if ($expected.Count -gt 0 -and -not $expected.ContainsKey($key)) {
+            $result.status = 'unexpected'
+            $result.error = "Unexpected result for $key at $($file.FullName)"
+        } elseif ($seen.ContainsKey($key)) {
+            $result.status = 'duplicate'
+            $result.error = "Duplicate result for $key at $($file.FullName)"
+        }
+        $seen[$key] = $true
         $rows += $result
     } catch {
         $rows += [pscustomobject]@{
@@ -41,6 +70,20 @@ foreach ($file in $resultFiles) {
             loaderVersion   = ''
             status          = 'invalid'
             error           = "Could not parse $($file.FullName): $_"
+            durationSeconds = 0
+        }
+    }
+}
+
+foreach ($key in $expected.Keys) {
+    if (-not $seen.ContainsKey($key)) {
+        $combination = $expected[$key]
+        $rows += [pscustomobject]@{
+            mc              = $combination.mc
+            loader          = $combination.loader
+            loaderVersion   = $combination.loaderVersion
+            status          = 'missing'
+            error           = "No result.json was produced for $key"
             durationSeconds = 0
         }
     }
@@ -85,7 +128,7 @@ if ($env:GITHUB_STEP_SUMMARY) {
 
 $summary | Write-Output
 
-if ($rows.Count -gt 0 -and $failed -gt 0) {
+if ($failed -gt 0 -or $rows.Count -eq 0) {
     exit 1
 }
 exit 0

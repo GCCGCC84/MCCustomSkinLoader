@@ -9,6 +9,7 @@ param(
     [string]$InfoFile = 'build.info.json',
     [string]$GameVersions = '',
     [string]$Loaders = '',
+    [string]$Pairs = '',
     [string]$CacheDir,
     [string]$OutputFile,
     [string]$SummaryFile,
@@ -124,6 +125,25 @@ if ($Loaders) {
     $configuredLoaders = @($Loaders -split ',' | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
 }
 
+$requestedPairs = @{}
+if ($Pairs) {
+    foreach ($pair in @($Pairs -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+        if ($pair -notmatch '^([^:]+):([^:]+)$') {
+            throw "Invalid pair '$pair'; expected mc:loader"
+        }
+        $mc = $Matches[1].Trim()
+        $loader = $Matches[2].Trim().ToLowerInvariant()
+        if ($mc -notin $allVersions -or $loader -notin $configuredLoaders) {
+            throw "Requested pair '$pair' is not in the selected Minecraft versions and loaders"
+        }
+        $requestedPairs["${mc}:$loader"] = $true
+    }
+    $allVersions = @($allVersions | Where-Object {
+            $version = $_
+            @($configuredLoaders | Where-Object { $requestedPairs.ContainsKey("${version}:$_") }).Count -gt 0
+        })
+}
+
 $include = @()
 $summaryLines = @()
 $skippedVersions = @()
@@ -133,6 +153,9 @@ foreach ($mcVersion in $allVersions) {
     $javaMajor = Get-JavaMajor -McVersion $mcVersion -CacheDir $CacheDir
     $loaderEntries = @()
     foreach ($loader in $configuredLoaders) {
+        if ($Pairs -and -not $requestedPairs.ContainsKey("${mcVersion}:$loader")) {
+            continue
+        }
         try {
             $entry = Get-LoaderEntry -Loader $loader -McVersion $mcVersion
         } catch {
@@ -151,6 +174,11 @@ foreach ($mcVersion in $allVersions) {
     }
 
     $loaderJson = ConvertTo-Json -InputObject @($loaderEntries) -Compress -Depth 5
+    foreach ($entry in $loaderEntries) {
+        if ($Pairs) {
+            $requestedPairs.Remove("${mcVersion}:$($entry.name)") | Out-Null
+        }
+    }
     # ModLauncher (Forge 1.13-1.16) reflects on sun.security.util.ManifestEntryVerifier,
     # whose constructor is gone in JDK 8u312+; pin Java 8 to the last working update.
     $javaVersion = if ($javaMajor -eq 8) { '8.0.302' } else { "$javaMajor" }
@@ -166,6 +194,10 @@ foreach ($mcVersion in $allVersions) {
 
     $loaderText = ($loaderEntries | ForEach-Object { "$($_.name) $($_.version)" }) -join ', '
     $summaryLines += "| $mcVersion | $javaMajor | $loaderText |"
+}
+
+if ($requestedPairs.Count -gt 0) {
+    throw "Requested pairs are unavailable: $(@($requestedPairs.Keys) -join ', ')"
 }
 
 # One shared download cache is prepared in the Prepare stage so test jobs
