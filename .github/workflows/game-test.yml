@@ -253,7 +253,7 @@ jobs:
               -MesaCacheDir $env:MESA_CACHE `
               -ResultDir $resultDir `
               -JoinTimeoutSeconds ([int]$env:JOIN_TIMEOUT) `
-              -QuiltSystemLibraries:($quiltSystemLibraries -and $loader.name -eq 'quilt') `
+              -QuiltSystemLibraries:($quiltSystemLibraries -and $loader.name -eq 'quilt' -and $env:MC_VERSION -match '^1\.(17\.1|18|18\.1)$') `
               -DeferredJoin:$deferredJoin `
               -SkipSoundAssets:$skipSounds
             if ($LASTEXITCODE -ne 0) {
