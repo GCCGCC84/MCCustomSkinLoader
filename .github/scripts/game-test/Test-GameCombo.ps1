@@ -27,7 +27,8 @@ param(
     [int]$WindowTimeoutSeconds = 120,
     [int]$ScreenshotTimeoutSeconds = 30,
     [int]$MaxMemoryMb = 2048,
-    [int]$JoinRelayHoldSeconds = 12
+    [int]$JoinRelayHoldSeconds = 12,
+    [switch]$QuiltSystemLibraries
 )
 
 Set-StrictMode -Version 1.0
@@ -450,7 +451,7 @@ try {
 
     $launch = New-MinecraftLaunchArguments -Profile $profile -Runtime $runtime -JavaExe $javaExe `
         -GameDir $gameDir -Username $Username -ServerHost $ServerHost -ServerPort $ServerPort `
-        -MaxMemoryMb $MaxMemoryMb
+        -MaxMemoryMb $MaxMemoryMb -QuiltSystemLibraries:$QuiltSystemLibraries
 
     $extraGameArguments = @()
     if ($useDeadProxy) {

@@ -610,7 +610,8 @@ function New-MinecraftLaunchArguments {
         [int]$Width = 854,
         [int]$Height = 480,
         [int]$MaxMemoryMb = 2048,
-        [string]$UserType = 'legacy'
+        [string]$UserType = 'legacy',
+        [switch]$QuiltSystemLibraries
     )
 
     $variables = @{
@@ -678,6 +679,21 @@ function New-MinecraftLaunchArguments {
         '-Dminecraft.launcher.brand=csl-game-test',
         '-Dminecraft.launcher.version=1.0'
     )
+
+    if ($QuiltSystemLibraries) {
+        if ([string]$Profile['mainClass'] -notlike 'org.quiltmc.*') {
+            throw 'Quilt system libraries can only be enabled for a Quilt launch profile'
+        }
+        $systemLibraries = @($Runtime.Classpath | Where-Object {
+                $_ -match '[\\/]com[\\/]mojang[\\/](blocklist|patchy)[\\/]'
+            })
+        if ($systemLibraries.Count -ne 2 -or
+            @($systemLibraries | Where-Object { $_ -match '[\\/]blocklist[\\/]' }).Count -ne 1 -or
+            @($systemLibraries | Where-Object { $_ -match '[\\/]patchy[\\/]' }).Count -ne 1) {
+            throw 'Expected exactly one blocklist jar and one patchy jar for Quilt'
+        }
+        $jvmArguments += '-Dloader.systemLibraries=' + ($systemLibraries -join [IO.Path]::PathSeparator)
+    }
 
     if ($Runtime.LoggingFile) {
         $loggingArgument = [string]$Profile['logging'].argument
