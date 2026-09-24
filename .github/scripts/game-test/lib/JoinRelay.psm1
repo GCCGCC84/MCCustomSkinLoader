@@ -470,6 +470,12 @@ function Test-JoinRelayRequired {
         [Parameter(Mandatory)][string]$Loader
     )
 
+    # Forge patches Minecraft to open the initial screen after the first
+    # resource reload, so the relay is only needed for Fabric and Quilt.
+    if ($Loader -in @('forge', 'neoforge')) {
+        return $false
+    }
+
     # 1.13.2-1.20.1 use the --server auto-connect; the client can reach the
     # world before its first resource reload and terrain pass are done and can
     # be kicked by the server while the main thread is busy. The relay holds
