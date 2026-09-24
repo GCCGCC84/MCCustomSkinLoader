@@ -317,6 +317,72 @@ function Get-MinecraftScreenshot {
     return $null
 }
 
+function Get-JavaMajorFromVersion {
+    param([Parameter(Mandatory)][string]$VersionText)
+
+    # Handles both a runtime banner ('openjdk version "1.8.0_302"') and a matrix
+    # label ('8.0.302', '17'): 1.8.0_302 -> 8, 17.0.20.1 -> 17.
+    if ($VersionText -match '(\d+)\.(\d+)') {
+        $first = [int]$Matches[1]
+        if ($first -eq 1) { return [int]$Matches[2] }
+        return $first
+    }
+    if ($VersionText -match '^\s*(\d+)\s*$') { return [int]$Matches[1] }
+    return $null
+}
+
+function Resolve-JavaHome {
+    param(
+        [Parameter(Mandatory)][string]$JavaHome,
+        [Parameter(Mandatory)][string]$JavaExe,
+        [string]$JavaMajor
+    )
+
+    # actions/setup-java occasionally leaves JAVA_HOME on the image default JDK: in run
+    # 36028966940 the 1.13.2 job requested Temurin 8.0.302 but started Forge on Java 17,
+    # which fails inside ModLauncher. Prefer a runner tool cache install that matches the
+    # requested version, and fail with a clear message when nothing matches.
+    if (-not $JavaMajor) {
+        return [pscustomobject]@{ JavaHome = $JavaHome; JavaExe = $JavaExe; ActualMajor = $null }
+    }
+    $expectedMajor = Get-JavaMajorFromVersion -VersionText $JavaMajor
+    $actualMajor = $null
+    try {
+        $versionLine = (& $JavaExe -version 2>&1 | Select-Object -First 1)
+        $actualMajor = Get-JavaMajorFromVersion -VersionText "$versionLine"
+    } catch {
+        Write-Warning "Could not read the version of '$JavaExe': $_"
+    }
+    Write-Output "Java for this combo: $JavaExe (reports $(if ($null -ne $actualMajor) { $actualMajor } else { 'unknown' }), requested $JavaMajor)"
+
+    if ($null -ne $actualMajor -and $null -ne $expectedMajor -and $actualMajor -ne $expectedMajor) {
+        $toolCache = if ($env:RUNNER_TOOL_CACHE) { Join-Path $env:RUNNER_TOOL_CACHE 'Java_Temurin-Hotspot_jdk' } else { $null }
+        $candidate = $null
+        if ($toolCache -and (Test-Path -LiteralPath $toolCache)) {
+            # The tool cache layout is Java_Temurin-Hotspot_jdk/<version>/<arch>/bin/java.exe.
+            $candidate = Get-ChildItem -LiteralPath $toolCache -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like "$JavaMajor*" } |
+                Sort-Object -Property Name -Descending |
+                ForEach-Object {
+                    Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue |
+                        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'bin/java.exe') } |
+                        Select-Object -First 1
+                } | Select-Object -First 1
+        }
+        if (-not $candidate) {
+            throw "java.exe at '$JavaExe' reports Java $actualMajor but $JavaMajor was requested and no matching JDK exists under '$toolCache'"
+        }
+        Write-Warning "JAVA_HOME pointed at Java $actualMajor; using the requested $JavaMajor from '$($candidate.FullName)'"
+        return [pscustomobject]@{
+            JavaHome    = $candidate.FullName
+            JavaExe     = (Join-Path $candidate.FullName 'bin/java.exe')
+            ActualMajor = $expectedMajor
+        }
+    }
+
+    return [pscustomobject]@{ JavaHome = $JavaHome; JavaExe = $JavaExe; ActualMajor = $actualMajor }
+}
+
 function Get-FileTail {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -423,6 +489,9 @@ $javaExe = Join-Path $JavaHome 'bin/java.exe'
 if (-not (Test-Path -LiteralPath $javaExe)) {
     throw "java.exe was not found under '$JavaHome'"
 }
+$java = Resolve-JavaHome -JavaHome $JavaHome -JavaExe $javaExe -JavaMajor $JavaMajor
+$JavaHome = $java.JavaHome
+$javaExe = $java.JavaExe
 if (-not $JavaMajor) {
     $JavaMajor = Split-Path -Leaf $JavaHome
 }
