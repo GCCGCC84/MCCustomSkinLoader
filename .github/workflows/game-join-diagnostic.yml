@@ -3,6 +3,7 @@ name: Game Join Diagnostic
 on:
   push:
     branches: ['diagnostic/game-test-fixes-35855058233']
+    paths: ['.github/scripts/game-test/diagnostic/**']
 
 permissions:
   contents: read

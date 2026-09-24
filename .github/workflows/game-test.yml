@@ -45,6 +45,10 @@ on:
         description: 'Diagnostic: load Quilt blocklist and patchy from the system classloader'
         type: boolean
         default: false
+      deferred_join:
+        description: 'Diagnostic: join the server from the title screen after initial resource loading'
+        type: boolean
+        default: false
 
 concurrency:
   group: game-test-${{ github.ref }}
@@ -227,11 +231,13 @@ jobs:
           JOIN_TIMEOUT: ${{ github.event.inputs.join_timeout || '300' }}
           SKIP_SOUND_ASSETS: ${{ github.event.inputs.skip_sound_assets }}
           QUILT_SYSTEM_LIBRARIES: ${{ github.event.inputs.quilt_system_libraries }}
+          DEFERRED_JOIN: ${{ github.event.inputs.deferred_join }}
           MESA_CACHE: ${{ runner.temp }}/mesa-cache
         run: |
           $loaders = $env:LOADERS | ConvertFrom-Json
           $skipSounds = $env:SKIP_SOUND_ASSETS -eq 'true'
           $quiltSystemLibraries = $env:QUILT_SYSTEM_LIBRARIES -eq 'true'
+          $deferredJoin = $env:DEFERRED_JOIN -eq 'true'
           $failures = 0
           foreach ($loader in $loaders) {
             $resultDir = Join-Path 'test-results' $loader.name
@@ -248,6 +254,7 @@ jobs:
               -ResultDir $resultDir `
               -JoinTimeoutSeconds ([int]$env:JOIN_TIMEOUT) `
               -QuiltSystemLibraries:($quiltSystemLibraries -and $loader.name -eq 'quilt') `
+              -DeferredJoin:$deferredJoin `
               -SkipSoundAssets:$skipSounds
             if ($LASTEXITCODE -ne 0) {
               $failures++

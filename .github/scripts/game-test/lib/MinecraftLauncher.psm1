@@ -611,7 +611,8 @@ function New-MinecraftLaunchArguments {
         [int]$Height = 480,
         [int]$MaxMemoryMb = 2048,
         [string]$UserType = 'legacy',
-        [switch]$QuiltSystemLibraries
+        [switch]$QuiltSystemLibraries,
+        [switch]$DeferredJoin
     )
 
     $variables = @{
@@ -655,11 +656,13 @@ function New-MinecraftLaunchArguments {
 
     $traits = @($Profile['traits'])
     $quickPlay = $traits -contains 'feature:is_quick_play_multiplayer'
-    if ($quickPlay) {
-        $gameArguments = Add-MinecraftArgumentIfMissing -Arguments $gameArguments -Name '--quickPlayMultiplayer' -Values "${ServerHost}:$ServerPort"
-    } else {
-        $gameArguments = Add-MinecraftArgumentIfMissing -Arguments $gameArguments -Name '--server' -Values $ServerHost
-        $gameArguments = Add-MinecraftArgumentIfMissing -Arguments $gameArguments -Name '--port' -Values ([string]$ServerPort)
+    if (-not $DeferredJoin) {
+        if ($quickPlay) {
+            $gameArguments = Add-MinecraftArgumentIfMissing -Arguments $gameArguments -Name '--quickPlayMultiplayer' -Values "${ServerHost}:$ServerPort"
+        } else {
+            $gameArguments = Add-MinecraftArgumentIfMissing -Arguments $gameArguments -Name '--server' -Values $ServerHost
+            $gameArguments = Add-MinecraftArgumentIfMissing -Arguments $gameArguments -Name '--port' -Values ([string]$ServerPort)
+        }
     }
 
     foreach ($tweaker in @($Profile['tweakers'])) {

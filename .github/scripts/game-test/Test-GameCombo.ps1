@@ -28,7 +28,8 @@ param(
     [int]$ScreenshotTimeoutSeconds = 30,
     [int]$MaxMemoryMb = 2048,
     [int]$JoinRelayHoldSeconds = 12,
-    [switch]$QuiltSystemLibraries
+    [switch]$QuiltSystemLibraries,
+    [switch]$DeferredJoin
 )
 
 Set-StrictMode -Version 1.0
@@ -39,6 +40,9 @@ Import-Module (Join-Path $PSScriptRoot 'lib/MinecraftLauncher.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'lib/Mesa3D.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'lib/GameWindow.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'lib/JoinRelay.psm1') -Force
+if ($DeferredJoin) {
+    Import-Module (Join-Path $PSScriptRoot 'diagnostic/DiagnosticWindow.psm1') -Force
+}
 
 $requiredCommands = @(
     'Get-MergedLaunchProfile', 'Install-MinecraftRuntime', 'Install-Mesa3D', 'Get-ProcessTreeId',
@@ -121,6 +125,35 @@ function Wait-ServerJoin {
         Start-Sleep -Seconds 2
     }
     return $false
+}
+
+function Wait-InitialResourceAtlas {
+    param(
+        [Parameter(Mandatory)][string]$LogPath,
+        [Parameter(Mandatory)][object]$Client,
+        [int]$HoldSeconds = 10,
+        [int]$TimeoutSeconds = 180
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $seenAt = $null
+    while ((Get-Date) -lt $deadline) {
+        if ($Client.Process.HasExited) {
+            throw "Minecraft client exited with code $($Client.Process.ExitCode) before deferred join"
+        }
+        if (Test-Path -LiteralPath $LogPath) {
+            $content = Get-Content -LiteralPath $LogPath -Raw -ErrorAction SilentlyContinue
+            if ($content -match 'Created:.*atlas') {
+                if ($null -eq $seenAt) {
+                    $seenAt = Get-Date
+                } elseif (((Get-Date) - $seenAt).TotalSeconds -ge $HoldSeconds) {
+                    return
+                }
+            }
+        }
+        Start-Sleep -Seconds 2
+    }
+    throw "Resource atlas marker was not observed before deferred join within $TimeoutSeconds seconds"
 }
 
 function Get-ServerSessionDropReason {
@@ -425,9 +458,14 @@ try {
 
     # A fresh game directory shows the accessibility onboarding screen on
     # Minecraft 1.19.1+, which blocks quick play from joining the server.
-    Set-Content -LiteralPath (Join-Path $gameDir 'options.txt') -Value 'onboardAccessibility:false' -Encoding utf8
+    if ($DeferredJoin) {
+        @('onboardAccessibility:false', 'guiScale:2', 'lang:en_us', 'skipMultiplayerWarning:true') |
+            Set-Content -LiteralPath (Join-Path $gameDir 'options.txt') -Encoding ascii
+    } else {
+        Set-Content -LiteralPath (Join-Path $gameDir 'options.txt') -Value 'onboardAccessibility:false' -Encoding utf8
+    }
 
-    $useJoinRelay = Test-JoinRelayRequired -McVersion $McVersion -Loader $Loader
+    $useJoinRelay = -not $DeferredJoin -and (Test-JoinRelayRequired -McVersion $McVersion -Loader $Loader)
     # Minecraft 1.16.4/1.16.5 silently treats the offline privileges response as
     # "servers not allowed" and skips the --server auto-connect. Pointing the
     # game proxy at a closed local port makes the request fail, so the client
@@ -451,7 +489,7 @@ try {
 
     $launch = New-MinecraftLaunchArguments -Profile $profile -Runtime $runtime -JavaExe $javaExe `
         -GameDir $gameDir -Username $Username -ServerHost $ServerHost -ServerPort $ServerPort `
-        -MaxMemoryMb $MaxMemoryMb -QuiltSystemLibraries:$QuiltSystemLibraries
+        -MaxMemoryMb $MaxMemoryMb -QuiltSystemLibraries:$QuiltSystemLibraries -DeferredJoin:$DeferredJoin
 
     $extraGameArguments = @()
     if ($useDeadProxy) {
@@ -467,6 +505,19 @@ try {
     $client = Start-MinecraftClient -JavaExe $launch.File -Arguments $launch.Arguments `
         -WorkingDirectory $launch.WorkingDir -StdOutFile (Join-Path $WorkDir 'client-stdout.log') `
         -StdErrFile (Join-Path $WorkDir 'client-stderr.log') -Environment $mesaEnvironment
+
+    if ($DeferredJoin) {
+        Wait-InitialResourceAtlas -LogPath (Join-Path $gameDir 'logs/latest.log') -Client $client
+        $processIds = Get-ProcessTreeId -RootId $client.Process.Id
+        $windowHandle = Get-GameWindow -ProcessIds $processIds -TitleLike 'Minecraft' -TimeoutSeconds $WindowTimeoutSeconds
+        if ($windowHandle -eq [IntPtr]::Zero) {
+            throw 'Minecraft title window was not found for deferred join'
+        }
+        $joinScreenshots = Join-Path $ResultDir 'screenshots'
+        Invoke-DiagnosticJoin -Handle $windowHandle -ServerHost $ServerHost -ServerPort $ServerPort `
+            -ScreenshotDir $joinScreenshots
+        Write-Output 'Deferred join submitted from Minecraft title screen.'
+    }
 
     Write-Output "Waiting for the client to join the server ..."
     if (-not (Wait-ServerJoin -Server $server -Client $client -TimeoutSeconds $JoinTimeoutSeconds)) {
