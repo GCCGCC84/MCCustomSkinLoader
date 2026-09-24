@@ -1,0 +1,70 @@
+name: Legacy Forge Connection Control
+
+on:
+  push:
+    branches: ['diagnostic/game-test-fixes-35855058233']
+    paths: ['.github/workflows/legacy-forge-control.yml']
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    name: ${{ matrix.mc }}-forge-without-csl
+    runs-on: windows-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - {mc: '1.13.2', loader_version: '25.0.223'}
+          - {mc: '1.14.2', loader_version: '26.0.63'}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '8.0.302'
+      - name: Download tested mod for fixed artifact fingerprint
+        uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: 35943954080
+          name: CustomSkinLoader-GameTest-17
+          path: artifact
+      - uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/shared-cache
+          key: mc-shared-win-914a71d78c24-v1
+          restore-keys: |
+            mc-shared-win-
+      - uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/mesa-cache
+          key: mesa3d-msvc-26.2.0
+      - name: Observe connection without CSL
+        shell: pwsh
+        env:
+          MC_VERSION: ${{ matrix.mc }}
+          LOADER_VERSION: ${{ matrix.loader_version }}
+        run: |
+          $jar = Get-ChildItem artifact -Recurse -Filter '*.jar' |
+            Where-Object { $_.Name -notlike '*-sources.jar' } | Select-Object -First 1
+          if (-not $jar) { throw 'Tested mod artifact missing' }
+          & ./.github/scripts/game-test/diagnostic/Invoke-TessellationProbe.ps1 `
+            -McVersion $env:MC_VERSION -Loader forge -LoaderVersion $env:LOADER_VERSION `
+            -Mode deferred-without-csl -WithCsl:$false -DeferredJoin:$true `
+            -ModJar $jar.FullName -JavaHome $env:JAVA_HOME `
+            -CacheDir "$env:RUNNER_TEMP/shared-cache" -MesaCacheDir "$env:RUNNER_TEMP/mesa-cache" `
+            -WorkDir "$env:RUNNER_TEMP/probe" -ResultDir diagnostic-results -ObserveSeconds 70
+      - name: Upload control evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: legacy-forge-${{ matrix.mc }}-without-csl
+          path: diagnostic-results/
+          include-hidden-files: true
+          retention-days: 14
+          if-no-files-found: warn
