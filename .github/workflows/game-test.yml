@@ -42,13 +42,13 @@ on:
         required: false
         default: '300'
       quilt_system_libraries:
-        description: 'Diagnostic: load Quilt blocklist and patchy from the system classloader'
-        type: boolean
-        default: false
+        description: "Quilt system libraries: '' = built-in list of affected combos, 'all', 'none', or comma-separated mc:loader pairs"
+        required: false
+        default: ''
       deferred_join:
-        description: 'Diagnostic: join the server from the title screen after initial resource loading'
-        type: boolean
-        default: false
+        description: "Deferred join: '' = built-in list of known early-connect combos, 'all', 'none', or comma-separated mc:loader pairs"
+        required: false
+        default: ''
 
 concurrency:
   group: game-test-${{ github.ref }}
@@ -236,11 +236,38 @@ jobs:
         run: |
           $loaders = $env:LOADERS | ConvertFrom-Json
           $skipSounds = $env:SKIP_SOUND_ASSETS -eq 'true'
-          $quiltSystemLibraries = $env:QUILT_SYSTEM_LIBRARIES -eq 'true'
-          $deferredJoin = $env:DEFERRED_JOIN -eq 'true'
+          # Deferred join: the vanilla --server auto-connect opens the connection before
+          # the first resource reload finishes. Verified with a no-CSL control that this
+          # renders a screen too early on 1.17-1.19 (Shader NPE) and that Forge 1.15.1
+          # re-enters ConnectingScreen in a loop, so these combos join from the title
+          # screen after the first resource reload instead.
+          $deferredJoinDefault = @(
+            '1.15.1:forge', '1.16:fabric', '1.16.4:quilt', '1.17:fabric', '1.17:quilt',
+            '1.17.1:quilt', '1.18:quilt', '1.18.1:quilt', '1.18.2:quilt', '1.19:quilt'
+          )
+          # Quilt 0.30.1 mixes com.mojang:blocklist and com.mojang:patchy across two class
+          # loaders on these versions, so ServiceLoader rejects MojangBlockListSupplier and
+          # the connection thread dies. Declaring both jars as loader.systemLibraries keeps
+          # them in one loader.
+          $quiltSystemLibrariesDefault = @('1.17:quilt', '1.17.1:quilt', '1.18:quilt', '1.18.1:quilt')
+
+          function Test-ComboPolicy {
+            param([string]$Policy, [string[]]$Default, [string]$Combo)
+            if ($Policy -eq 'true' -or $Policy -eq 'all') { return $true }
+            if ($Policy -eq 'false' -or $Policy -eq 'none') { return $false }
+            $list = if ($Policy) { @($Policy -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } else { $Default }
+            return ($list -contains $Combo)
+          }
+
           $failures = 0
           foreach ($loader in $loaders) {
             $resultDir = Join-Path 'test-results' $loader.name
+            $combo = "$env:MC_VERSION:$($loader.name)"
+            $deferredJoin = Test-ComboPolicy -Policy $env:DEFERRED_JOIN -Default $deferredJoinDefault -Combo $combo
+            $quiltSystemLibraries = (Test-ComboPolicy -Policy $env:QUILT_SYSTEM_LIBRARIES -Default $quiltSystemLibrariesDefault -Combo $combo) -and $loader.name -eq 'quilt'
+            if ($deferredJoin -or $quiltSystemLibraries) {
+              Write-Host "$combo uses deferredJoin=$deferredJoin quiltSystemLibraries=$quiltSystemLibraries"
+            }
             & ./.github/scripts/game-test/Test-GameCombo.ps1 `
               -McVersion $env:MC_VERSION `
               -Loader $loader.name `
@@ -253,7 +280,7 @@ jobs:
               -MesaCacheDir $env:MESA_CACHE `
               -ResultDir $resultDir `
               -JoinTimeoutSeconds ([int]$env:JOIN_TIMEOUT) `
-              -QuiltSystemLibraries:($quiltSystemLibraries -and $loader.name -eq 'quilt' -and $env:MC_VERSION -match '^1\.(17(\.1)?|18(\.1)?)$') `
+              -QuiltSystemLibraries:$quiltSystemLibraries `
               -DeferredJoin:$deferredJoin `
               -SkipSoundAssets:$skipSounds
             if ($LASTEXITCODE -ne 0) {
