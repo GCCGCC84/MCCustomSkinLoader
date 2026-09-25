@@ -234,6 +234,31 @@ function Get-SessionNote {
     return ($notes -join '; ')
 }
 
+function Get-ClientLoginProcessed {
+    param([Parameter(Mandatory)][string]$GameDir)
+
+    # Did the client ever get past the login exchange? Every version the harness
+    # supports logs "Loaded <n> advancements" once the world is joined, and the
+    # Forge clients additionally log the negotiated connection type.
+    $logPath = Join-Path $GameDir 'logs/latest.log'
+    if (-not (Test-Path -LiteralPath $logPath)) { return $null }
+    $content = Get-Content -LiteralPath $logPath -Raw -ErrorAction SilentlyContinue
+    if (-not $content) { return $null }
+    if ($content -notmatch 'Connecting to') { return $null }
+    return [bool]($content -match 'Loaded [0-9]+ advancements|Connected to a (vanilla|modded) server')
+}
+
+function Get-ClientLoginNote {
+    param([Parameter(Mandatory)][string]$GameDir)
+
+    $processed = Get-ClientLoginProcessed -GameDir $GameDir
+    if ($null -eq $processed) { return $null }
+    if ($processed) { return $null }
+    return 'the client logged Connecting to the server but never processed the login response ' +
+        '(known upstream Forge 1.13.2/1.14.2/1.14.3 client defect: it stops reading its socket right after ' +
+        'Login Start; fixed in later Forge builds, see investigation/legacy-forge-20260925/ in the work notes)'
+}
+
 function Wait-JoinRelayRelease {
     param(
         [Parameter(Mandatory)][string]$LogPath,
@@ -517,6 +542,7 @@ $result = [ordered]@{
     skinPixelsPassed = $false
     sessionDrop      = $null
     clientExitCode   = $null
+    clientLogin      = $null
     relayFaults      = 0
     screenshot       = $null
     capeScreenshot   = $null
@@ -778,7 +804,15 @@ try {
     Stop-JoinRelay
     $result.sessionDrop = $script:sessionDrop
     $result.clientExitCode = $script:sessionExitCode
+    # Record whether the client ever got past the login exchange; when it did not,
+    # name the known legacy Forge client defect instead of leaving the downstream
+    # symptom (a missing CustomSkinLoader.log) as the only explanation.
+    $result.clientLogin = Get-ClientLoginProcessed -GameDir $gameDir
     if ($result.status -ne 'passed') {
+        $loginNote = Get-ClientLoginNote -GameDir $gameDir
+        if ($loginNote) {
+            $result.error = if ($result.error) { "$($result.error) - $loginNote" } else { $loginNote }
+        }
         # Explain a failure with the session state that was observed instead of only
         # reporting the downstream symptom (for example a missing CustomSkinLoader.log).
         $note = Get-SessionNote
