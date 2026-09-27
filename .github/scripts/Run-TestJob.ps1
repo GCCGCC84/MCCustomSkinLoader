@@ -125,8 +125,8 @@ if ($serverReady) {
         $cslLaunchTime = (Get-Date).ToUniversalTime()
 
         Write-Host "[$clientName] launching"
-        $client = Start-Process -FilePath "pwsh" -ArgumentList @("-NoProfile", "-File", "`"$clientScript`"") `
-            -WorkingDirectory $ClientDir -RedirectStandardOutput $clientOut -RedirectStandardError $clientOut -PassThru -NoNewWindow
+        $command = "& '$clientScript' 2>&1 | Tee-Object -FilePath '$clientOut'"
+        $client = Start-Process -FilePath "pwsh" -ArgumentList @("-NoProfile", "-Command", $command) -WorkingDirectory $ClientDir -PassThru -NoNewWindow
 
         $clientLineCount = 0
         $cslLineCount = 0
