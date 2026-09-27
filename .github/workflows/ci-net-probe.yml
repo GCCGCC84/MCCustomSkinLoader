@@ -1,0 +1,36 @@
+name: CI Network Probe
+
+# Temporary probe used while investigating run 36321751210: Minecraft 26.3 needs
+# https://discovery.minecraftservices.com during login. This job records whether a
+# GitHub-hosted Windows runner can reach it at all.
+on:
+  workflow_dispatch:
+  push:
+    branches: [ci/matrix-harness-fix]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Probe Mojang endpoints
+    runs-on: windows-latest
+    steps:
+      - name: Probe endpoints
+        shell: pwsh
+        run: |
+          $endpoints = @(
+            'https://discovery.minecraftservices.com/minecraft/client',
+            'https://api.minecraftservices.com/',
+            'https://piston-meta.mojang.com/mc/game/version_manifest_v2.json'
+          )
+          foreach ($endpoint in $endpoints) {
+            try {
+              $response = Invoke-WebRequest -Uri $endpoint -UseBasicParsing -TimeoutSec 30
+              Write-Host "PROBE OK   $endpoint -> HTTP $($response.StatusCode)"
+            } catch {
+              Write-Host "PROBE FAIL $endpoint -> $($_.Exception.Message)"
+            }
+          }
+          Write-Host "--- curl.exe ---"
+          curl.exe -sS -o NUL -w "curl %{http_code} in %{time_total}s`n" --max-time 30 "https://discovery.minecraftservices.com/minecraft/client"
