@@ -586,9 +586,12 @@ foreach ($versionObject in $allVersions) {
     if ($versionId -like 'quilt-loader-*' -and $MinecraftVersion -in @('1.17', '1.17.1', '1.18', '1.18.1')) {
         $systemLibraries = @($classpathPaths | Where-Object { $_ -match '[\\/]blocklist[\\/]' -or $_ -match '[\\/]patchy[\\/]' })
         if ($systemLibraries.Count -eq 2) {
-            $jvmArguments += '-Dloader.systemLibraries=' + ($systemLibraries -join [IO.Path]::PathSeparator)
+            # Classpath entries are relative to the libraries directory, so resolve them the same way
+            # the classpath itself is: with the launcher's ${library_directory}/${classpath_separator}.
+            $systemLibraryPaths = @($systemLibraries | ForEach-Object { '${library_directory}/' + $_ })
+            $jvmArguments += '-Dloader.systemLibraries=' + ($systemLibraryPaths -join '${classpath_separator}')
         } else {
-            Write-Warning "Quilt system libraries for $versionId: expected blocklist and patchy, found $($systemLibraries.Count)"
+            Write-Warning ("Quilt system libraries for ${versionId}: expected blocklist and patchy, found " + $systemLibraries.Count)
         }
     }
 
@@ -609,7 +612,7 @@ foreach ($versionObject in $allVersions) {
     }
     $unknownPlaceholders = @($usedPlaceholders | Sort-Object -Unique | Where-Object { $definedPlaceholders -notcontains $_ })
     if ($unknownPlaceholders.Count -gt 0) {
-        throw "[$versionId] launch arguments reference placeholders the launcher script does not define: $($unknownPlaceholders -join ', ')"
+        throw ("[" + $versionId + "] launch arguments reference placeholders the launcher script does not define: " + ($unknownPlaceholders -join ", "))
     }
 
     $lines = New-Object System.Collections.Generic.List[string]
