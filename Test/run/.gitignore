@@ -1,0 +1,7 @@
+*
+!client/
+!client/launcher_profiles.json
+!client/options.txt
+!server/
+!server/server.properties
+!server/eula.txt
