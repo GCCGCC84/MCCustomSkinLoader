@@ -12,7 +12,7 @@ jobs:
   prepare:
     name: Prepare Test Matrix
     runs-on: windows-latest
-    timeout-minutes: 360
+    timeout-minutes: 30
     outputs:
       matrix: ${{ steps.prepare.outputs.matrix }}
     steps:
@@ -23,40 +23,29 @@ jobs:
         with:
           distribution: temurin
           java-version: '25'
+          cache: gradle
+
+      - name: Build test installer
+        shell: pwsh
+        run: ./Test/gradlew.bat -p Test build --console=plain
+
+      - name: Upload test installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-installer
+          path: Test/build/libs/*.jar
+          if-no-files-found: error
 
       - name: Prepare test matrix
         id: prepare
         shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path run | Out-Null
-          Get-ChildItem -LiteralPath Test/run -Force | ForEach-Object {
-            Copy-Item -LiteralPath $_.FullName -Destination run -Recurse -Force
-          }
-          ./Test/gradlew.bat -p Test build --console=plain
-          ./.github/scripts/Prepare-TestMatrix.ps1
-
-      - name: Upload installer logs
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: installer-logs
-          path: installer-logs
-          if-no-files-found: ignore
-
-      - name: Cache run
-        if: always()
-        uses: actions/cache@v6
-        with:
-          path: run
-          key: test-run-${{ runner.os }}-${{ github.run_id }}
-          restore-keys: |
-            test-run-${{ runner.os }}-
+        run: ./.github/scripts/Prepare-TestMatrix.ps1
 
   test:
     name: Test ${{ matrix.version }}
     needs: prepare
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       max-parallel: 20
@@ -64,27 +53,28 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Setup Java ${{ matrix.java }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: run/client/mods
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: test-installer
+          path: Test/build/libs
+
+      - name: Prepare test environment
+        id: setup
+        shell: pwsh
+        env:
+          INSTALLERS: ${{ toJSON(matrix.loaders) }}
+        run: ./.github/scripts/Prepare-TestVersion.ps1 -MinecraftVersion '${{ matrix.version }}' -MinecraftJsonUrl '${{ matrix.json_url }}' -MinecraftJsonSha1 '${{ matrix.json_sha1 }}'
+
+      - name: Setup Java ${{ steps.setup.outputs.java }}
         uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: ${{ matrix.java }}
-
-      - name: Restore run
-        uses: actions/cache/restore@v6
-        with:
-          path: run
-          key: test-run-${{ runner.os }}-${{ github.run_id }}
-          restore-keys: |
-            test-run-${{ runner.os }}-
-
-      - name: Restore git-managed files
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path run | Out-Null
-          Get-ChildItem -LiteralPath Test/run -Force | ForEach-Object {
-            Copy-Item -LiteralPath $_.FullName -Destination run -Recurse -Force
-          }
+          java-version: ${{ steps.setup.outputs.java }}
 
       - name: Setup Mesa3D
         shell: pwsh
@@ -96,17 +86,14 @@ jobs:
           $archive = Get-ChildItem -LiteralPath mesa -Filter '*.7z' | Select-Object -First 1
           7z x $archive.FullName '-omesa\extracted' -y | Out-Null
           Copy-Item -Path 'mesa\extracted\x64\*.dll' -Destination "$env:JAVA_HOME\bin" -Force
-          'GALLIUM_DRIVER=llvmpipe' | Out-File -FilePath $env:GITHUB_ENV -Append
-          'LIBGL_ALWAYS_SOFTWARE=1' | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: ${{ inputs.artifact-name }}
-          path: run/client/mods
 
       - name: Run test
         shell: pwsh
-        run: ./.github/scripts/Run-TestJob.ps1 -MinecraftVersion '${{ matrix.version }}' -Clients '${{ join(matrix.clients, ',') }}'
+        env:
+          ALSOFT_DRIVERS: 'null'
+          GALLIUM_DRIVER: llvmpipe
+          LIBGL_ALWAYS_SOFTWARE: 1
+        run: ./.github/scripts/Run-TestJob.ps1 -MinecraftVersion '${{ matrix.version }}' -Clients '${{ steps.setup.outputs.clients }}'
 
       - name: Upload diagnostics
         if: always()
@@ -114,6 +101,7 @@ jobs:
         with:
           name: test-diagnostics-${{ matrix.version }}
           path: |
+            installer-logs
             run/client/crash-reports
             run/client/logs
             run/client/CustomSkinLoader/CustomSkinLoader.log

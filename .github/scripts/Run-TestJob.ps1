@@ -119,15 +119,14 @@ if ($serverReady) {
         }
 
         $clientOut = Join-Path $ClientLogDir "$clientName.log"
-        $clientErr = Join-Path $ClientLogDir "$clientName.err.log"
-        Remove-Item -LiteralPath $clientOut, $clientErr -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $clientOut -Force -ErrorAction SilentlyContinue
 
         $screenshotsBefore = @(Get-ChildItem -LiteralPath $ScreenshotsDir -File -ErrorAction SilentlyContinue).Count
         $cslLaunchTime = (Get-Date).ToUniversalTime()
 
         Write-Host "[$clientName] launching"
         $client = Start-Process -FilePath "pwsh" -ArgumentList @("-NoProfile", "-File", "`"$clientScript`"") `
-            -WorkingDirectory $ClientDir -RedirectStandardOutput $clientOut -RedirectStandardError $clientErr -PassThru -NoNewWindow
+            -WorkingDirectory $ClientDir -RedirectStandardOutput $clientOut -RedirectStandardError $clientOut -PassThru -NoNewWindow
 
         $clientLineCount = 0
         $cslLineCount = 0
