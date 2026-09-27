@@ -578,6 +578,40 @@ foreach ($versionObject in $allVersions) {
     $assetIndexId = ""
     if ($versionObject.assetIndex -and $versionObject.assetIndex.id) { $assetIndexId = [string]$versionObject.assetIndex.id }
 
+    # Quilt classifies com.mojang:patchy as a log4j plugin jar (it carries com/mojang/patchy/LegacyXMLLayout)
+    # and loads it outside the game classloader, so Minecraft's block list lookup fails on the connect thread
+    # with "com.mojang.blocklist.BlockListSupplier: com.mojang.patchy.MojangBlockListSupplier not a subtype"
+    # and the client never joins the server. Quilt's loader.systemLibraries property puts those two jars back
+    # into a single classloader, which is what a plain launcher classpath gives by construction.
+    if ($versionId -like 'quilt-loader-*' -and $MinecraftVersion -in @('1.17', '1.17.1', '1.18', '1.18.1')) {
+        $systemLibraries = @($classpathPaths | Where-Object { $_ -match '[\\/]blocklist[\\/]' -or $_ -match '[\\/]patchy[\\/]' })
+        if ($systemLibraries.Count -eq 2) {
+            $jvmArguments += '-Dloader.systemLibraries=' + ($systemLibraries -join [IO.Path]::PathSeparator)
+        } else {
+            Write-Warning "Quilt system libraries for $versionId: expected blocklist and patchy, found $($systemLibraries.Count)"
+        }
+    }
+
+    # Arguments are emitted as PowerShell double-quoted strings so that ${...} is resolved when the
+    # generated script runs. Anything the launcher does not define would silently reach the JVM as a
+    # literal, so refuse to generate a script with unresolved placeholders.
+    $definedPlaceholders = @(
+        'version_name', 'game_directory', 'assets_root', 'assets_index_name', 'quickPlayMultiplayer',
+        'auth_player_name', 'auth_uuid', 'auth_access_token', 'clientid', 'auth_xuid', 'user_properties',
+        'user_type', 'version_type', 'launcher_name', 'launcher_version', 'library_directory',
+        'classpath_separator', 'primary_jar', 'natives_directory', 'logging_config_path', 'classpath'
+    )
+    $usedPlaceholders = New-Object System.Collections.Generic.List[string]
+    foreach ($argument in (@($jvmArguments) + @($gameArguments))) {
+        foreach ($match in [regex]::Matches([string]$argument, '\$\{([A-Za-z0-9_]+)\}')) {
+            $usedPlaceholders.Add($match.Groups[1].Value)
+        }
+    }
+    $unknownPlaceholders = @($usedPlaceholders | Sort-Object -Unique | Where-Object { $definedPlaceholders -notcontains $_ })
+    if ($unknownPlaceholders.Count -gt 0) {
+        throw "[$versionId] launch arguments reference placeholders the launcher script does not define: $($unknownPlaceholders -join ', ')"
+    }
+
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add('$ErrorActionPreference = "Stop"')
     $lines.Add("")
