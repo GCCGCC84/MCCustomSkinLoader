@@ -73,6 +73,19 @@ function Get-GameWindow {
     } | Select-Object -First 1)
 }
 
+function Wait-GameWindow {
+    param([int]$TimeoutSeconds = 60)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        $window = Get-GameWindow
+        if ($window) { return $window }
+        Start-Sleep -Seconds 2
+    }
+    $seen = @(Get-Process -Name java -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Id):'$($_.MainWindowTitle)'" })
+    Write-Host "[keys] no Minecraft window yet, java processes: $($seen -join ', ')"
+    return $null
+}
+
 function Save-WindowCapture {
     # PrintWindow capture: works without the window being in the foreground, used as join evidence.
     param([IntPtr]$Handle, [string]$Path)
@@ -144,7 +157,7 @@ function Invoke-DeferredJoin {
         return $false
     }
 
-    $game = Get-GameWindow
+    $game = Wait-GameWindow -TimeoutSeconds 60
     if (-not $game) {
         Write-Host "[$ClientName] Minecraft window not found for deferred join"
         return $false
@@ -282,7 +295,9 @@ if ($serverReady) {
         $client = Start-Process -FilePath "pwsh" -ArgumentList @("-NoProfile", "-Command", $command) -WorkingDirectory $ClientDir -PassThru -NoNewWindow
 
         if ($DeferredJoinClients -contains $clientName) {
-            [void](Invoke-DeferredJoin -ClientName $clientName -GameLogPath (Join-Path $ClientLogDir 'latest.log') `
+            # Use the client's own stdout log: run/client/logs/latest.log still holds the previous
+            # client's content until this client writes its own.
+            [void](Invoke-DeferredJoin -ClientName $clientName -GameLogPath $clientOut `
                 -CaptureDir $DeferredJoinCaptureDir -ServerAddress $ServerAddress -ServerPort $ServerPort)
         }
 
