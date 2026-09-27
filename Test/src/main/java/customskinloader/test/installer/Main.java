@@ -4,6 +4,7 @@ import java.awt.Component;
 import java.awt.Container;
 import java.awt.Window;
 import java.io.File;
+import java.lang.reflect.Array;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -143,6 +144,8 @@ public class Main {
         selectedDirTextField.setAccessible(true);
         final Field choiceButtonGroupField = panelClass.getDeclaredField("choiceButtonGroup");
         choiceButtonGroupField.setAccessible(true);
+        final Field optionalsField = panelClass.getDeclaredField("optionals");
+        optionalsField.setAccessible(true);
         final Method updateFilePathMethod = panelClass.getDeclaredMethod("updateFilePath");
         updateFilePathMethod.setAccessible(true);
 
@@ -163,6 +166,27 @@ public class Main {
                     }
                     if (choiceButtonGroup.getSelection() == null || !CLIENT_ACTION.equals(choiceButtonGroup.getSelection().getActionCommand())) {
                         throw new IllegalStateException("CLIENT action is not selectable");
+                    }
+
+                    // The legacy Forge installer (spec 1.7.7) appends optional libraries via text concatenation;
+                    // its "name" line has a Java operator-precedence bug that writes a stray comma, corrupting the JSON
+                    // (e.g. Mercurius on 1.11/1.12/1.12.1). Here, all optionals are unchecked before Install is clicked.
+                    Object optionals = optionalsField.get(installerPanel);
+                    if (optionals != null && optionals.getClass().isArray()) {
+                        int optionalsCount = Array.getLength(optionals);
+                        for (int i = 0; i < optionalsCount; i++) {
+                            Object optional = Array.get(optionals, i);
+                            if (optional == null) {
+                                continue;
+                            }
+                            try {
+                                Method setEnabledMethod = optional.getClass().getMethod("setEnabled", boolean.class);
+                                setEnabledMethod.setAccessible(true);
+                                setEnabledMethod.invoke(optional, false);
+                            } catch (NoSuchMethodException e) {
+                                throw new IllegalStateException(e);
+                            }
+                        }
                     }
                     updateFilePathMethod.invoke(installerPanel);
                 } catch (Exception e) {

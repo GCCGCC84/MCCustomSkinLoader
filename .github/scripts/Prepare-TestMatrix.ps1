@@ -544,7 +544,7 @@ $installJobs | ForEach-Object -Parallel {
             throw "[$loader] failed to install for $gameVersion (exit code $LASTEXITCODE)"
         }
     }
-} -ThrottleLimit 16
+} -ThrottleLimit 4
 
 Write-Host "[$(Get-Date -Format s)] Resolving inheritsFrom"
 $versionObjects = [ordered]@{}
