@@ -311,7 +311,23 @@ foreach ($installer in $installers) {
     $versionsBefore = @(Get-ChildItem -LiteralPath $VersionsDir -Directory | Select-Object -ExpandProperty Name)
     switch ($loader) {
         "fabric" { & $InstallerJava -jar $installerPath client -dir $ClientDir -mcversion $MinecraftVersion 2>&1 | Out-File -FilePath $installerLog -Encoding utf8 -Append }
-        "quilt" { & $InstallerJava -jar $installerPath install client $MinecraftVersion "--install-dir=$ClientDir" 2>&1 | Out-File -FilePath $installerLog -Encoding utf8 -Append }
+        "quilt" {
+            # quilt-installer always installs the newest loader. On these Minecraft versions that loader
+            # mis-classifies com.mojang:patchy (its log4j probe matches, so the jar leaves the game class
+            # loader while com.mojang:blocklist stays), and Minecraft's server block list lookup then
+            # throws "MojangBlockListSupplier not a subtype" on the connect thread: the client never
+            # joins and CustomSkinLoader never loads. Loader 0.17.10 is from the 1.17/1.18 era and keeps
+            # both jars together; measured on 1.17.1 - loader 0.30.1: ServiceConfigurationError on every
+            # connect, loader 0.17.10: none and the skin loads (investigation/run-36321751210, run
+            # 36340960943).
+            $quiltLoaderPolicy = if ($MinecraftVersion -in @('1.17', '1.17.1', '1.18', '1.18.1')) { '0.17.10' } else { '' }
+            $quiltLoader = if ($env:QUILT_LOADER_VERSION) { $env:QUILT_LOADER_VERSION } else { $quiltLoaderPolicy }
+            $quiltArgs = @("install", "client", $MinecraftVersion)
+            if ($quiltLoader) { $quiltArgs += $quiltLoader }
+            $quiltArgs += "--install-dir=$ClientDir"
+            Write-Host "[$(Get-Date -Format s)] [quilt] installing for $MinecraftVersion (loader: $(if ($quiltLoader) { $quiltLoader } else { 'latest' }))"
+            & $InstallerJava -jar $installerPath @quiltArgs 2>&1 | Out-File -FilePath $installerLog -Encoding utf8 -Append
+        }
         "forge" { & $InstallerJava -cp "$installerPath;$TestJarPath" customskinloader.test.installer.Main --installClient $ClientDir 2>&1 | Out-File -FilePath $installerLog -Encoding utf8 -Append }
         "neoforge" { & $InstallerJava -jar $installerPath --installClient $ClientDir 2>&1 | Out-File -FilePath $installerLog -Encoding utf8 -Append }
         default { throw "Unknown loader: $loader" }
@@ -577,23 +593,6 @@ foreach ($versionObject in $allVersions) {
 
     $assetIndexId = ""
     if ($versionObject.assetIndex -and $versionObject.assetIndex.id) { $assetIndexId = [string]$versionObject.assetIndex.id }
-
-    # Quilt classifies com.mojang:patchy as a log4j plugin jar (it carries com/mojang/patchy/LegacyXMLLayout)
-    # and loads it outside the game classloader, so Minecraft's block list lookup fails on the connect thread
-    # with "com.mojang.blocklist.BlockListSupplier: com.mojang.patchy.MojangBlockListSupplier not a subtype"
-    # and the client never joins the server. Quilt's loader.systemLibraries property puts those two jars back
-    # into a single classloader, which is what a plain launcher classpath gives by construction.
-    if ($versionId -like 'quilt-loader-*' -and $MinecraftVersion -in @('1.17', '1.17.1', '1.18', '1.18.1')) {
-        $systemLibraries = @($classpathPaths | Where-Object { $_ -match '[\\/]blocklist[\\/]' -or $_ -match '[\\/]patchy[\\/]' })
-        if ($systemLibraries.Count -eq 2) {
-            # Classpath entries are relative to the libraries directory, so resolve them the same way
-            # the classpath itself is: with the launcher's ${library_directory}/${classpath_separator}.
-            $systemLibraryPaths = @($systemLibraries | ForEach-Object { '${library_directory}/' + $_ })
-            $jvmArguments += '-Dloader.systemLibraries=' + ($systemLibraryPaths -join '${classpath_separator}')
-        } else {
-            Write-Warning ("Quilt system libraries for ${versionId}: expected blocklist and patchy, found " + $systemLibraries.Count)
-        }
-    }
 
     # Arguments are emitted as PowerShell double-quoted strings so that ${...} is resolved when the
     # generated script runs. Anything the launcher does not define would silently reach the JVM as a
