@@ -35,4 +35,4 @@ jobs:
     uses: ./.github/workflows/test.yml
     with:
       artifact-name: CustomSkinLoader-Verify-${{ github.run_number }}
-      versions: ${{ github.event_name == 'workflow_dispatch' && inputs.versions || '1.16.5,1.20.2,1.21.2,1.21.5,1.21.8,26.3,1.21.11,26.2' }}
+      versions: ${{ github.event_name == 'workflow_dispatch' && inputs.versions || '1.17.1,1.18,1.18.1,1.19' }}
