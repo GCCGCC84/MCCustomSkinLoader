@@ -30,6 +30,9 @@ public static class TestJobNativeMethods {
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct POINT { public int X; public int Y; }
+
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr hWnd);
 
@@ -50,6 +53,15 @@ public static class TestJobNativeMethods {
 
     [DllImport("user32.dll")]
     public static extern uint GetDpiForWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool ClientToScreen(IntPtr hWnd, ref POINT point);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetCursorPos(int x, int y);
+
+    [DllImport("user32.dll")]
+    public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
 }
 "@
 
@@ -118,19 +130,37 @@ function Save-WindowCapture {
 }
 
 function Send-GuiClick {
+    # Click through the normal input queue, like a user: bring the window forward, move the cursor to
+    # the client-relative point converted to screen coordinates and press/release the left button.
+    # PostMessage turned out to be unreliable for this game window (a click meant for Multiplayer was
+    # handled as if it had landed one menu entry higher), while the cursor path is what the F2 key
+    # injection already relies on successfully.
     param([IntPtr]$Handle, [int]$X, [int]$Y)
-    $lParam = [IntPtr](($Y -shl 16) -bor ($X -band 0xFFFF))
-    [void][TestJobNativeMethods]::PostMessage($Handle, 0x0201, [IntPtr]1, $lParam)
-    Start-Sleep -Milliseconds 120
-    [void][TestJobNativeMethods]::PostMessage($Handle, 0x0202, [IntPtr]0, $lParam)
+    [void][TestJobNativeMethods]::ShowWindow($Handle, 9)
+    [void][TestJobNativeMethods]::SetForegroundWindow($Handle)
+    Start-Sleep -Milliseconds 300
+    $point = New-Object TestJobNativeMethods+POINT
+    $point.X = $X
+    $point.Y = $Y
+    if (-not [TestJobNativeMethods]::ClientToScreen($Handle, [ref]$point)) {
+        Write-Host "[keys] ClientToScreen failed for ($X,$Y)"
+        return $false
+    }
+    [void][TestJobNativeMethods]::SetCursorPos($point.X, $point.Y)
+    Start-Sleep -Milliseconds 150
+    [TestJobNativeMethods]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 80
+    [TestJobNativeMethods]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+    return $true
 }
 
 function Send-GuiText {
+    # The window is in the foreground after the click, so real key events reach the focused widget.
     param([IntPtr]$Handle, [string]$Text)
-    foreach ($character in $Text.ToCharArray()) {
-        [void][TestJobNativeMethods]::PostMessage($Handle, 0x0102, [IntPtr][int]$character, [IntPtr]1)
-        Start-Sleep -Milliseconds 70
-    }
+    [void][TestJobNativeMethods]::SetForegroundWindow($Handle)
+    Start-Sleep -Milliseconds 200
+    [System.Windows.Forms.SendKeys]::SendWait($Text.Replace('{', '{{').Replace('}', '}}'))
+    Start-Sleep -Milliseconds 300
 }
 
 function Wait-ResourceLoadComplete {
