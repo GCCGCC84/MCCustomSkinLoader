@@ -233,6 +233,11 @@ function Invoke-DeferredJoin {
     # bottom row at height - 52, and the direct connect screen has the address box at y = 116 with
     # Join Server at height/4 + 108. All values are GUI pixels; +scale/2 targets the button centre.
     $centerX = [int]($guiWidth / 2 * $guiScale + $guiScale / 2)
+    # Minecraft 1.17 shows a one-time "Caution: Third-Party Online Play" notice before the multiplayer
+    # list. Its Proceed button is the left button of a row at height - 28, one row *below* the
+    # multiplayer list's buttons (height - 52), so clicking here is harmless when the notice is gone.
+    $proceedX = [int](($guiWidth / 2 - 80) * $guiScale + $guiScale / 2)
+    $proceedY = [int](($guiHeight - 18) * $guiScale + $guiScale / 2)
     $multiplayerY = [int](($guiHeight / 4 + 82) * $guiScale + $guiScale / 2)
     $directConnectY = [int](($guiHeight - 42) * $guiScale + $guiScale / 2)
     $addressFieldY = [int](126 * $guiScale + $guiScale / 2)
@@ -246,6 +251,10 @@ function Invoke-DeferredJoin {
     Send-GuiClick -Handle $handle -X $centerX -Y $multiplayerY
     Start-Sleep -Seconds 3
     [void](Save-WindowCapture -Handle $handle -Path (Join-Path $CaptureDir 'ui-1-multiplayer.png'))
+
+    Send-GuiClick -Handle $handle -X $proceedX -Y $proceedY
+    Start-Sleep -Seconds 2
+    [void](Save-WindowCapture -Handle $handle -Path (Join-Path $CaptureDir 'ui-1b-proceed.png'))
 
     Send-GuiClick -Handle $handle -X $centerX -Y $directConnectY
     Start-Sleep -Seconds 2
