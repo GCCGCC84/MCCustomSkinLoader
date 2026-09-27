@@ -44,6 +44,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Cache run
+        if: always()
         uses: actions/cache@v6
         with:
           path: run

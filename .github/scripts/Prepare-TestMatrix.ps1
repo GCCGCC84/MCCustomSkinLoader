@@ -366,7 +366,7 @@ $loaders = @($info.loaders)
 $gameVersions = @($info.game_versions)
 $modVersion = [string]$info.mod_version
 
-Write-Host "Fetching version metadata"
+Write-Host "[$(Get-Date -Format s)] Fetching version metadata"
 $mojangManifest = Get-RemoteJson $GameVersionManifestUrl
 $fabricGame = Get-RemoteJson $FabricGameVersionsUrl
 $quiltGame = Get-RemoteJson $QuiltGameVersionsUrl
@@ -389,7 +389,7 @@ if ($loaders -contains "forge") {
         $prefix = "$gameVersion-"
         $matches = @($forgeVersions | Where-Object { $_.StartsWith($prefix) })
         if ($matches.Count -eq 0) {
-            Write-Host "Forge: no build for $gameVersion, skipped"
+            Write-Host "[$(Get-Date -Format s)] Forge: no build for $gameVersion, skipped"
             continue
         }
         $latest = @($matches | Sort-Object { Get-VersionSortKey ($_.Substring($prefix.Length)) })[-1]
@@ -408,7 +408,7 @@ if ($loaders -contains "neoforge") {
         $prefix = if (($gameVersion -split "\.").Count -le 2) { "$normalized.0." } else { "$normalized." }
         $matches = @($neoForgeVersions | Where-Object { $_.StartsWith($prefix) })
         if ($matches.Count -eq 0) {
-            Write-Host "NeoForge: no build for $gameVersion, skipped"
+            Write-Host "[$(Get-Date -Format s)] NeoForge: no build for $gameVersion, skipped"
             continue
         }
         $latest = @($matches | Sort-Object { Get-VersionSortKey ($_.Substring($prefix.Length)) })[-1]
@@ -456,10 +456,10 @@ foreach ($selection in $neoForgeSelections) {
         Path = $selection.InstallerPath
     }
 }
-Write-Host "Downloading $($installerDownloads.Count) installer(s)"
+Write-Host "[$(Get-Date -Format s)] Downloading $($installerDownloads.Count) installer(s)"
 Invoke-Downloads -Downloads $installerDownloads
 
-Write-Host "Downloading version JSONs"
+Write-Host "[$(Get-Date -Format s)] Downloading version JSONs"
 $manifestEntries = @{}
 foreach ($entry in $mojangManifest.versions) { $manifestEntries[[string]$entry.id] = $entry }
 $versionJsonDownloads = @()
@@ -510,7 +510,7 @@ if ($neoForgeSelections.Count -gt 0) {
     }
 }
 
-Write-Host "Installing mod loaders"
+Write-Host "[$(Get-Date -Format s)] Installing mod loaders"
 # The Forge 1.14.3 installer performs the DEOBF_REALMS post-processing step (net.minecraftforge.installertools.DeobfRealms),
 # and when it downloads libraries/com/mojang/realms/1.14.17/realms-1.14.17.jar, it does not create the parent directory,
 # so installing in an empty directory throws NoSuchFileException, causing "Failed to download realms jar".
@@ -527,7 +527,7 @@ $installJobs | ForEach-Object -Parallel {
         $installer = [string]$item.Installer
         $installerLog = Join-Path $installerLogsDir "$loader-$gameVersion.log"
         "[$(Get-Date -Format s)] $loader $gameVersion" | Out-File -FilePath $installerLog -Encoding utf8
-        Write-Host "[$loader] installing for $gameVersion"
+        Write-Host "[$(Get-Date -Format s)] [$loader] installing for $gameVersion | ThreadId=$([System.Threading.Thread]::CurrentThread.ManagedThreadId)"
         switch ($loader) {
             "fabric" { & java -jar $installer client -dir $clientDir -mcversion $gameVersion 2>&1 | Out-File -FilePath $installerLog -Encoding utf8 -Append }
             "quilt" { & java -jar $installer install client $gameVersion "--install-dir=$clientDir" 2>&1 | Out-File -FilePath $installerLog -Encoding utf8 -Append }
@@ -544,9 +544,9 @@ $installJobs | ForEach-Object -Parallel {
             throw "[$loader] failed to install for $gameVersion (exit code $LASTEXITCODE)"
         }
     }
-} -ThrottleLimit 8
+} -ThrottleLimit 16
 
-Write-Host "Resolving inheritsFrom"
+Write-Host "[$(Get-Date -Format s)] Resolving inheritsFrom"
 $versionObjects = [ordered]@{}
 foreach ($directory in (Get-ChildItem -LiteralPath $VersionsDir -Directory)) {
     $jsonPath = Join-Path $directory.FullName "$($directory.Name).json"
@@ -574,7 +574,7 @@ function Resolve-VersionObject {
 foreach ($id in @($versionObjects.Keys)) { [void](Resolve-VersionObject -Id $id) }
 $allVersions = @($mergedObjects.Values)
 
-Write-Host "Downloading client jars"
+Write-Host "[$(Get-Date -Format s)] Downloading client jars"
 $clientDownloads = [ordered]@{}
 foreach ($versionObject in $allVersions) {
     $client = $versionObject.downloads.client
@@ -589,7 +589,7 @@ foreach ($versionObject in $allVersions) {
 }
 Invoke-Downloads -Downloads @($clientDownloads.Values)
 
-Write-Host "Downloading server jars"
+Write-Host "[$(Get-Date -Format s)] Downloading server jars"
 $serverDownloads = [ordered]@{}
 foreach ($versionObject in $allVersions) {
     if ($versionObject.PSObject.Properties["inheritsFrom"] -and $versionObject.inheritsFrom) { continue }
@@ -605,7 +605,7 @@ foreach ($versionObject in $allVersions) {
 }
 Invoke-Downloads -Downloads @($serverDownloads.Values)
 
-Write-Host "Downloading libraries"
+Write-Host "[$(Get-Date -Format s)] Downloading libraries"
 $libraryDownloads = [ordered]@{}
 $nativeJarsByVersion = [ordered]@{}
 foreach ($versionObject in $allVersions) {
@@ -639,7 +639,7 @@ foreach ($versionObject in $allVersions) {
 }
 Invoke-Downloads -Downloads @($libraryDownloads.Values)
 
-Write-Host "Extracting natives"
+Write-Host "[$(Get-Date -Format s)] Extracting natives"
 $extractions = New-Object System.Collections.Generic.List[object]
 foreach ($versionId in $nativeJarsByVersion.Keys) {
     $destination = Join-Path (Join-Path $VersionsDir $versionId) "natives"
@@ -649,7 +649,7 @@ foreach ($versionId in $nativeJarsByVersion.Keys) {
 }
 Invoke-Extractions -Extractions $extractions.ToArray()
 
-Write-Host "Downloading logging configs"
+Write-Host "[$(Get-Date -Format s)] Downloading logging configs"
 $loggingDownloads = [ordered]@{}
 foreach ($versionObject in $allVersions) {
     $logging = $versionObject.logging
@@ -667,7 +667,7 @@ foreach ($versionObject in $allVersions) {
 }
 Invoke-Downloads -Downloads @($loggingDownloads.Values)
 
-Write-Host "Downloading asset indexes"
+Write-Host "[$(Get-Date -Format s)] Downloading asset indexes"
 $assetIndexDownloads = [ordered]@{}
 foreach ($versionObject in $allVersions) {
     $assetIndex = $versionObject.assetIndex
@@ -682,7 +682,7 @@ foreach ($versionObject in $allVersions) {
 }
 Invoke-Downloads -Downloads @($assetIndexDownloads.Values)
 
-Write-Host "Downloading assets"
+Write-Host "[$(Get-Date -Format s)] Downloading assets"
 $assetHashes = [ordered]@{}
 foreach ($indexFile in (Get-ChildItem -LiteralPath $AssetIndexesDir -Filter "*.json" -File)) {
     $assetIndex = Get-Content -LiteralPath $indexFile.FullName -Raw | ConvertFrom-Json
@@ -705,7 +705,7 @@ foreach ($hash in $assetHashes.Keys) {
 }
 Invoke-Downloads -Downloads $assetDownloads.ToArray()
 
-Write-Host "Generating launch scripts"
+Write-Host "[$(Get-Date -Format s)] Generating launch scripts"
 $legacyJvmArguments = @(
     "-Dos.name=Windows 10"
     "-Dos.version=10.0"
@@ -805,7 +805,7 @@ foreach ($versionObject in $allVersions) {
     Set-Content -LiteralPath (Join-Path $ClientDir "$versionId.ps1") -Value $lines.ToArray() -Encoding utf8
 }
 
-Write-Host "Generating test matrix"
+Write-Host "[$(Get-Date -Format s)] Generating test matrix"
 $clientScriptNames = @(Get-ChildItem -LiteralPath $ClientDir -Filter "*.ps1" -File | Select-Object -ExpandProperty Name)
 $matrixInclude = @()
 foreach ($gameVersion in $gameVersions) {
@@ -847,5 +847,5 @@ if ($env:GITHUB_OUTPUT) {
     $matrixJson | Out-File -FilePath $env:GITHUB_OUTPUT -Append
     "EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 }
-Write-Host $matrixJson
-Write-Host "Done. Generated $($allVersions.Count) launch script(s)"
+Write-Host "[$(Get-Date -Format s)] $matrixJson"
+Write-Host "[$(Get-Date -Format s)] Done. Generated $($allVersions.Count) launch script(s)"
