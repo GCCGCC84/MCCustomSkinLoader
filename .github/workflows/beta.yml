@@ -1,7 +1,7 @@
 name: Beta
 on:
   push:
-    branches: [15-develop]
+    branches: [15-develop, 15/26.3-citest]
 
 permissions:
   contents: write
