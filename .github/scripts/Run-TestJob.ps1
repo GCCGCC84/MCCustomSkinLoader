@@ -172,34 +172,63 @@ function Invoke-DeferredJoin {
     }
     $width = $rect.Right - $rect.Left
     $height = $rect.Bottom - $rect.Top
-    $guiWidth = [Math]::Ceiling($width / 2.0)
-    $guiHeight = [Math]::Ceiling($height / 2.0)
-    $scaleY = $height / $guiHeight
-    Write-Host "[$ClientName] join window ${width}x${height}, gui=${guiWidth}x${guiHeight}"
+    # Minecraft picks the largest GUI scale (1..4) whose virtual resolution still fits 320x240
+    # (see Window.calculateScale / Options.guiScale == auto). The menu coordinates below are in GUI
+    # pixels, so the scale has to be derived from the window instead of assumed.
+    $guiScale = 1
+    while ($guiScale -lt 4 -and
+           [Math]::Floor($width / ($guiScale + 1)) -ge 320 -and
+           [Math]::Floor($height / ($guiScale + 1)) -ge 240) { $guiScale++ }
+    $guiWidth = [int][Math]::Floor($width / $guiScale)
+    $guiHeight = [int][Math]::Floor($height / $guiScale)
+    Write-Host "[$ClientName] join window ${width}x${height}, gui ${guiWidth}x${guiHeight} at scale $guiScale"
+
+    # Vanilla menu geometry (1.13 - 1.20): the title screen puts Multiplayer at
+    # height/4 + 72 (20 px tall), the multiplayer list puts Direct Connection in the middle of the
+    # bottom row at height - 52, and the direct connect screen has the address box at y = 116 with
+    # Join Server at height/4 + 108. All values are GUI pixels; +scale/2 targets the button centre.
+    $centerX = [int]($guiWidth / 2 * $guiScale + $guiScale / 2)
+    $multiplayerY = [int](($guiHeight / 4 + 82) * $guiScale + $guiScale / 2)
+    $directConnectY = [int](($guiHeight - 42) * $guiScale + $guiScale / 2)
+    $addressFieldY = [int](126 * $guiScale + $guiScale / 2)
+    $joinServerY = [int](($guiHeight / 4 + 118) * $guiScale + $guiScale / 2)
 
     [void][TestJobNativeMethods]::ShowWindow($handle, 9)
     [void][TestJobNativeMethods]::SetForegroundWindow($handle)
     Start-Sleep -Milliseconds 500
     [void](Save-WindowCapture -Handle $handle -Path (Join-Path $CaptureDir 'ui-0-title.png'))
 
-    Send-GuiClick -Handle $handle -X ([int]($width / 2)) -Y ([int](($guiHeight / 4 + 82) * $scaleY))
+    Send-GuiClick -Handle $handle -X $centerX -Y $multiplayerY
     Start-Sleep -Seconds 3
     [void](Save-WindowCapture -Handle $handle -Path (Join-Path $CaptureDir 'ui-1-multiplayer.png'))
 
-    Send-GuiClick -Handle $handle -X ([int]($width / 2)) -Y ([int](($guiHeight - 42) * $scaleY))
+    Send-GuiClick -Handle $handle -X $centerX -Y $directConnectY
     Start-Sleep -Seconds 2
     [void](Save-WindowCapture -Handle $handle -Path (Join-Path $CaptureDir 'ui-2-direct-connect.png'))
 
-    Send-GuiClick -Handle $handle -X ([int]($width / 2)) -Y ([int](126 * $scaleY))
+    Send-GuiClick -Handle $handle -X $centerX -Y $addressFieldY
     Send-GuiText -Handle $handle -Text "${ServerAddress}:$ServerPort"
     Start-Sleep -Seconds 1
     [void](Save-WindowCapture -Handle $handle -Path (Join-Path $CaptureDir 'ui-3-address.png'))
 
-    Send-GuiClick -Handle $handle -X ([int]($width / 2)) -Y ([int](($guiHeight / 4 + 118) * $scaleY))
+    Send-GuiClick -Handle $handle -X $centerX -Y $joinServerY
     Start-Sleep -Seconds 3
     [void](Save-WindowCapture -Handle $handle -Path (Join-Path $CaptureDir 'ui-4-joining.png'))
-    Write-Host "[$ClientName] deferred join submitted for ${ServerAddress}:$ServerPort"
-    return $true
+
+    # Give the connect a moment and report whether the client actually reached the server, so a
+    # coordinate regression is visible in the job log instead of only as a missing skin.
+    $connectedAt = (Get-Date).AddSeconds(30)
+    $connected = $false
+    while ((Get-Date) -lt $connectedAt) {
+        if ((Test-Path -LiteralPath $GameLogPath) -and
+            (Get-Content -LiteralPath $GameLogPath -Raw -ErrorAction SilentlyContinue) -match 'Connecting to') {
+            $connected = $true
+            break
+        }
+        Start-Sleep -Seconds 1
+    }
+    Write-Host "[$ClientName] deferred join submitted for ${ServerAddress}:$ServerPort (client connecting: $connected)"
+    return $connected
 }
 
 function Send-GameKeys {
