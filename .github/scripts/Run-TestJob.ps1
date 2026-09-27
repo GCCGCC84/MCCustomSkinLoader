@@ -47,6 +47,9 @@ public static class TestJobNativeMethods {
 
     [DllImport("user32.dll")]
     public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
+
+    [DllImport("user32.dll")]
+    public static extern uint GetDpiForWindow(IntPtr hWnd);
 }
 "@
 
@@ -96,6 +99,10 @@ function Save-WindowCapture {
     if ($width -le 0 -or $height -le 0) { return $false }
     $directory = Split-Path -Parent $Path
     if ($directory -and -not (Test-Path -LiteralPath $directory)) { New-Item -ItemType Directory -Force -Path $directory | Out-Null }
+    $dpi = [TestJobNativeMethods]::GetDpiForWindow($Handle)
+    if ($dpi -le 0) { $dpi = 96 }
+    $width = [int][Math]::Round($width * ($dpi / 96.0))
+    $height = [int][Math]::Round($height * ($dpi / 96.0))
     $bitmap = New-Object System.Drawing.Bitmap($width, $height)
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
     $hdc = $graphics.GetHdc()
@@ -172,6 +179,14 @@ function Invoke-DeferredJoin {
     }
     $width = $rect.Right - $rect.Left
     $height = $rect.Bottom - $rect.Top
+    # PowerShell is not per-monitor DPI aware, so GetClientRect (and any bitmap sized from it) comes
+    # back in virtualized pixels while the game window, its framebuffer and the coordinates it expects
+    # in window messages are physical. Scale by the window's DPI before doing any menu geometry.
+    $dpi = [TestJobNativeMethods]::GetDpiForWindow($handle)
+    if ($dpi -le 0) { $dpi = 96 }
+    $dpiScale = $dpi / 96.0
+    $width = [int][Math]::Round($width * $dpiScale)
+    $height = [int][Math]::Round($height * $dpiScale)
     # Minecraft picks the largest GUI scale (1..4) whose virtual resolution still fits 320x240
     # (see Window.calculateScale / Options.guiScale == auto). The menu coordinates below are in GUI
     # pixels, so the scale has to be derived from the window instead of assumed.
@@ -181,7 +196,7 @@ function Invoke-DeferredJoin {
            [Math]::Floor($height / ($guiScale + 1)) -ge 240) { $guiScale++ }
     $guiWidth = [int][Math]::Floor($width / $guiScale)
     $guiHeight = [int][Math]::Floor($height / $guiScale)
-    Write-Host "[$ClientName] join window ${width}x${height}, gui ${guiWidth}x${guiHeight} at scale $guiScale"
+    Write-Host "[$ClientName] join window ${width}x${height} (dpi $dpi), gui ${guiWidth}x${guiHeight} at scale $guiScale"
 
     # Vanilla menu geometry (1.13 - 1.20): the title screen puts Multiplayer at
     # height/4 + 72 (20 px tall), the multiplayer list puts Direct Connection in the middle of the
