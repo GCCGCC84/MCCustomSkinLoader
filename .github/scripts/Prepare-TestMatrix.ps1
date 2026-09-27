@@ -511,6 +511,11 @@ if ($neoForgeSelections.Count -gt 0) {
 }
 
 Write-Host "Installing mod loaders"
+# The Forge 1.14.3 installer performs the DEOBF_REALMS post-processing step (net.minecraftforge.installertools.DeobfRealms),
+# and when it downloads libraries/com/mojang/realms/1.14.17/realms-1.14.17.jar, it does not create the parent directory,
+# so installing in an empty directory throws NoSuchFileException, causing "Failed to download realms jar".
+# In the current matrix, only the 1.14.3 Forge installer has this processor, so the directory is created in advance here.
+New-Item -ItemType Directory -Force -Path (Join-Path $LibrariesDir "com/mojang/realms/1.14.17") | Out-Null
 $installJobs | ForEach-Object -Parallel {
     $clientDir = $using:ClientDir
     $testJarPath = $using:TestJarPath
