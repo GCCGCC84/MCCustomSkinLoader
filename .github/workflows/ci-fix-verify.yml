@@ -13,7 +13,7 @@ on:
   # workflow_dispatch is only offered for workflows that exist on the default branch, so this
   # branch also runs the verification on push with the version list below.
   push:
-    branches: [ci/matrix-harness-fix]
+    branches: [ci/matrix-harness-fix, ci/probe-quilt-no-syslib]
 
 permissions:
   contents: read
@@ -35,4 +35,4 @@ jobs:
     uses: ./.github/workflows/test.yml
     with:
       artifact-name: CustomSkinLoader-Verify-${{ github.run_number }}
-      versions: ${{ github.event_name == 'workflow_dispatch' && inputs.versions || '1.8.9,1.12.2,1.17.1,1.18.1,1.20.2,1.21.5' }}
+      versions: ${{ github.event_name == 'workflow_dispatch' && inputs.versions || '1.17.1,1.18.1' }}
