@@ -311,7 +311,15 @@ foreach ($installer in $installers) {
     $versionsBefore = @(Get-ChildItem -LiteralPath $VersionsDir -Directory | Select-Object -ExpandProperty Name)
     switch ($loader) {
         "fabric" { & $InstallerJava -jar $installerPath client -dir $ClientDir -mcversion $MinecraftVersion 2>&1 | Out-File -FilePath $installerLog -Encoding utf8 -Append }
-        "quilt" { & $InstallerJava -jar $installerPath install client $MinecraftVersion "--install-dir=$ClientDir" 2>&1 | Out-File -FilePath $installerLog -Encoding utf8 -Append }
+        "quilt" {
+            # Probe: pin the loader version instead of letting the installer pick the latest, so the
+            # combo matches what a player of that Minecraft version would have had.
+            $quiltLoader = $env:QUILT_LOADER_VERSION
+            $quiltArgs = @("install", "client", $MinecraftVersion)
+            if ($quiltLoader) { $quiltArgs += $quiltLoader }
+            $quiltArgs += "--install-dir=$ClientDir"
+            & $InstallerJava -jar $installerPath @quiltArgs 2>&1 | Out-File -FilePath $installerLog -Encoding utf8 -Append
+        }
         "forge" { & $InstallerJava -cp "$installerPath;$TestJarPath" customskinloader.test.installer.Main --installClient $ClientDir 2>&1 | Out-File -FilePath $installerLog -Encoding utf8 -Append }
         "neoforge" { & $InstallerJava -jar $installerPath --installClient $ClientDir 2>&1 | Out-File -FilePath $installerLog -Encoding utf8 -Append }
         default { throw "Unknown loader: $loader" }
