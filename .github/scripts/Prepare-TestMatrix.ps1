@@ -1,3 +1,8 @@
+param(
+    # Optional comma separated list of Minecraft versions. Empty means every version in build.info.json.
+    [string]$Versions = ""
+)
+
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
@@ -55,6 +60,14 @@ function Get-MavenLatestVersion {
 $info = Get-Content -LiteralPath "build.info.json" -Raw | ConvertFrom-Json
 $loaders = @($info.loaders)
 $gameVersions = @($info.game_versions)
+
+if ($Versions) {
+    $requested = @($Versions -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $unknown = @($requested | Where-Object { $gameVersions -notcontains $_ })
+    if ($unknown.Count -gt 0) { throw "Unknown Minecraft version(s): $($unknown -join ', ')" }
+    $gameVersions = $requested
+    Write-Host "[$(Get-Date -Format s)] Version filter active: $($gameVersions -join ', ')"
+}
 
 Write-Host "[$(Get-Date -Format s)] Fetching version metadata"
 $mojangManifest = Get-RemoteJson $GameVersionManifestUrl

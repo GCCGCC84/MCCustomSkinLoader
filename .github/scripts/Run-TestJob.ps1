@@ -60,8 +60,14 @@ function Send-GameKeys {
         return $false
     }
     Write-Host "[keys] window: $($game.MainWindowTitle)"
-    [TestJobNativeMethods]::ShowWindow($game.MainWindowHandle, 9) | Out-Null
-    [TestJobNativeMethods]::SetForegroundWindow($game.MainWindowHandle) | Out-Null
+    # SetForegroundWindow can be refused by the foreground lock, so ask twice before injecting keys.
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        [TestJobNativeMethods]::ShowWindow($game.MainWindowHandle, 9) | Out-Null
+        $foreground = [TestJobNativeMethods]::SetForegroundWindow($game.MainWindowHandle)
+        if ($foreground) { break }
+        Write-Host "[keys] SetForegroundWindow refused (attempt $attempt)"
+        Start-Sleep -Milliseconds 1000
+    }
     Start-Sleep -Milliseconds 1000
     [System.Windows.Forms.SendKeys]::SendWait("{F5}")
     Start-Sleep -Milliseconds 500
@@ -166,16 +172,24 @@ if ($serverReady) {
 
         Write-Host "[$clientName] skin loaded, waiting 1 second"
         Start-Sleep -Seconds 1
-        if (-not (Send-GameKeys)) {
-            $failed = $true
-        }
-
+        # Key injection is single-shot by nature and the runner desktop is busy, so retry instead of
+        # failing the run when the first attempt does not produce a file.
         $screenshotFound = $false
-        $screenshotDeadline = (Get-Date).AddSeconds(30)
-        while ((Get-Date) -lt $screenshotDeadline) {
-            $screenshotsAfter = @(Get-ChildItem -LiteralPath $ScreenshotsDir -File -ErrorAction SilentlyContinue).Count
-            if ($screenshotsAfter -gt $screenshotsBefore) { $screenshotFound = $true; break }
-            Start-Sleep -Milliseconds 500
+        for ($attempt = 1; $attempt -le 3 -and -not $screenshotFound; $attempt++) {
+            if (-not (Send-GameKeys)) {
+                $failed = $true
+                break
+            }
+
+            $screenshotDeadline = (Get-Date).AddSeconds(15)
+            while ((Get-Date) -lt $screenshotDeadline) {
+                $screenshotsAfter = @(Get-ChildItem -LiteralPath $ScreenshotsDir -File -ErrorAction SilentlyContinue).Count
+                if ($screenshotsAfter -gt $screenshotsBefore) { $screenshotFound = $true; break }
+                Start-Sleep -Milliseconds 500
+            }
+            if (-not $screenshotFound) {
+                Write-Host "[$clientName] screenshot attempt $attempt produced no file"
+            }
         }
         if ($screenshotFound) {
             Write-Host "[$clientName] screenshot captured"

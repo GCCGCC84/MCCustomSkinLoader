@@ -131,20 +131,52 @@ function Get-LibraryBaseUrl {
     return $url
 }
 
+function Get-LibraryCoordinate {
+    param([string]$Name)
+    # Maven coordinates may carry an extension ("group:artifact:version@jar"). The extension is not
+    # part of the version, so it has to be stripped before the coordinates are used as a path.
+    $coordinates = $Name
+    $extension = "jar"
+    if ($coordinates -match '@([^@]+)$') {
+        $extension = $Matches[1]
+        $coordinates = $coordinates.Substring(0, $coordinates.Length - $Matches[1].Length - 1)
+    }
+    $parts = @($coordinates -split ":")
+    if ($parts.Count -lt 3) { return $null }
+    $classifier = ""
+    if ($parts.Count -ge 4 -and $parts[3]) { $classifier = [string]$parts[3] }
+    return [pscustomobject]@{
+        Group      = [string]$parts[0]
+        Artifact   = [string]$parts[1]
+        Version    = [string]$parts[2]
+        Classifier = $classifier
+        Extension  = $extension
+    }
+}
+
+function Get-LibraryKey {
+    # Identity of an artifact slot on the classpath. Two entries that only differ in version (or in
+    # the "@ext" suffix of their name) provide the same classes, so only one of them may be kept.
+    param([string]$Name)
+    $coordinate = Get-LibraryCoordinate $Name
+    if (-not $coordinate) { return $null }
+    return "$($coordinate.Group):$($coordinate.Artifact)`:$($coordinate.Classifier)"
+}
+
 function Get-LibraryDerivedPath {
-    param([string[]]$Parts)
-    $group = $Parts[0]
-    $artifactName = $Parts[1]
-    $version = $Parts[2]
-    $fileName = "$artifactName-$version"
-    if ($Parts.Count -ge 4 -and $Parts[3]) { $fileName += "-$($Parts[3])" }
-    $fileName += ".jar"
-    return "$($group -replace '\.', '/')/$artifactName/$version/$fileName"
+    param([string]$Name)
+    $coordinate = Get-LibraryCoordinate $Name
+    if (-not $coordinate) { return $null }
+    $fileName = "$($coordinate.Artifact)-$($coordinate.Version)"
+    if ($coordinate.Classifier) { $fileName += "-$($coordinate.Classifier)" }
+    $fileName += ".$($coordinate.Extension)"
+    return "$($coordinate.Group -replace '\.', '/')/$($coordinate.Artifact)/$($coordinate.Version)/$fileName"
 }
 
 function Get-LibraryArtifact {
     param($Library)
-    $parts = @([string]$Library.name -split ":")
+    $name = [string]$Library.name
+    $parts = @($name -split ":")
     if ($parts.Count -lt 3) { return $null }
     $artifact = $Library.downloads.artifact
     if ($artifact -and $artifact.path) {
@@ -157,7 +189,7 @@ function Get-LibraryArtifact {
         }
     }
     if ($Library.downloads) { return $null }
-    $path = Get-LibraryDerivedPath $parts
+    $path = Get-LibraryDerivedPath $name
     return [pscustomobject]@{ Path = $path; Url = ((Get-LibraryBaseUrl $Library $parts) + $path); Sha1 = "" }
 }
 
@@ -373,7 +405,7 @@ foreach ($versionObject in $allVersions) {
                 }
             } else {
                 $nativeParts = @($parts[0], $parts[1], $parts[2], $classifier)
-                $path = Get-LibraryDerivedPath $nativeParts
+                $path = Get-LibraryDerivedPath ($nativeParts -join ":")
                 $native = [pscustomobject]@{ Path = $path; Url = ((Get-LibraryBaseUrl $library $parts) + $path); Sha1 = "" }
             }
             $destination = Join-Path $LibrariesDir $native.Path
@@ -510,7 +542,13 @@ foreach ($versionObject in $allVersions) {
         $gameArguments += @("--server", $ServerAddress, "--port", "$ServerPort")
     }
     # Work around the 1.16.4/1.16.5 authlib returning invalid data and disabling multiplayer by setting an invalid proxy address and port.
-    $gameArguments += @("--proxyHost", $ServerAddress, "--proxyPort", "$ServerPort")
+    # Only those two versions need it: the client turns these arguments into a SOCKS proxy for its
+    # authlib HTTP calls, and pointing that proxy at the game port makes every Minecraft Services
+    # request hang until it times out. Minecraft 26.3 needs those services to finish logging in, so
+    # the client never joins the server and the skin never loads.
+    if ($MinecraftVersion -in @("1.16.4", "1.16.5")) {
+        $gameArguments += @("--proxyHost", $ServerAddress, "--proxyPort", "$ServerPort")
+    }
 
     $loggingConfigPath = ""
     $logging = $versionObject.logging
@@ -523,9 +561,16 @@ foreach ($versionObject in $allVersions) {
     $seenLibraries = @{}
     foreach ($library in @($versionObject.libraries)) {
         if (-not (Test-Rules $library.rules)) { continue }
-        $key = [string]$library.name
-        if ($seenLibraries.ContainsKey($key)) { continue }
-        $seenLibraries[$key] = $true
+        # A loader profile may repeat an artifact that the game already provides, either with a
+        # different version (Fabric ships its own ASM, Forge its own Guava) or with an "@ext"
+        # suffix in the maven coordinates. Both copies would end up on the classpath and the
+        # loader then aborts: Fabric reports "duplicate ASM classes found on classpath", Forge
+        # and NeoForge fail module resolution. The loader profile is merged before the game, so
+        # keeping the first occurrence keeps the loader's version.
+        $libraryKey = Get-LibraryKey ([string]$library.name)
+        if (-not $libraryKey) { continue }
+        if ($seenLibraries.ContainsKey($libraryKey)) { continue }
+        $seenLibraries[$libraryKey] = $true
         $classpathArtifact = Get-LibraryArtifact $library
         if ($classpathArtifact) { $classpathPaths += $classpathArtifact.Path }
     }

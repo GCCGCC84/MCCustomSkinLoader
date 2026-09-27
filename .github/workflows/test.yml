@@ -7,6 +7,11 @@ on:
         description: Name of the artifact uploaded by the build action
         required: true
         type: string
+      versions:
+        description: Optional comma separated list of Minecraft versions to test (empty = full matrix)
+        required: false
+        type: string
+        default: ''
 
 jobs:
   prepare:
@@ -39,7 +44,7 @@ jobs:
       - name: Prepare test matrix
         id: prepare
         shell: pwsh
-        run: ./.github/scripts/Prepare-TestMatrix.ps1
+        run: ./.github/scripts/Prepare-TestMatrix.ps1 -Versions '${{ inputs.versions }}'
 
   test:
     name: Test ${{ matrix.version }}
