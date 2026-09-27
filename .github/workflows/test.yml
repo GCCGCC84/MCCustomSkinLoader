@@ -12,6 +12,11 @@ on:
         required: false
         type: string
         default: ''
+      quilt-loader-version:
+        description: Optional Quilt loader version to pin (empty = per-version default from Prepare-TestVersion.ps1)
+        required: false
+        type: string
+        default: ''
 
 jobs:
   prepare:
@@ -73,6 +78,7 @@ jobs:
         shell: pwsh
         env:
           INSTALLERS: ${{ toJSON(matrix.loaders) }}
+          QUILT_LOADER_VERSION: ${{ inputs.quilt-loader-version }}
         run: ./.github/scripts/Prepare-TestVersion.ps1 -MinecraftVersion '${{ matrix.version }}' -MinecraftJsonUrl '${{ matrix.json_url }}' -MinecraftJsonSha1 '${{ matrix.json_sha1 }}'
 
       - name: Setup Java ${{ steps.setup.outputs.java }}
