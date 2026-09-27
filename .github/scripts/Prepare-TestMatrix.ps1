@@ -11,7 +11,11 @@ $NeoForgeMetadataUrl = "https://maven.neoforged.net/releases/net/neoforged/neofo
 $FabricInstallerMetadataUrl = "https://maven.fabricmc.net/net/fabricmc/fabric-installer/maven-metadata.xml"
 $QuiltInstallerMetadataUrl = "https://maven.quiltmc.org/repository/release/org/quiltmc/quilt-installer/maven-metadata.xml"
 
-$RunDir = Join-Path (Get-Location).Path "Test/run"
+$ServerAddress = "127.0.0.1"
+$ServerPort = 25565
+$TestJarPath = Join-Path (Get-Location).Path "Test/build/libs/MCCustomSkinLoader-Test-1.0.0.jar"
+
+$RunDir = Join-Path (Get-Location).Path "./run"
 $ClientDir = Join-Path $RunDir "client"
 $ServerDir = Join-Path $RunDir "server"
 $VersionsDir = Join-Path $ClientDir "versions"
@@ -30,7 +34,7 @@ $Features = @{
     has_custom_resolution        = $false
     has_quick_plays_support      = $false
     is_quick_play_singleplayer   = $false
-    is_quick_play_multiplayer    = $false
+    is_quick_play_multiplayer    = $true
     is_quick_play_realms         = $false
 }
 
@@ -453,6 +457,31 @@ foreach ($selection in $neoForgeSelections) {
 Write-Host "Downloading $($installerDownloads.Count) installer(s)"
 Invoke-Downloads -Downloads $installerDownloads
 
+Write-Host "Downloading version JSONs"
+$manifestEntries = @{}
+foreach ($entry in $mojangManifest.versions) { $manifestEntries[[string]$entry.id] = $entry }
+$versionJsonDownloads = @()
+foreach ($gameVersion in $gameVersions) {
+    $entry = $manifestEntries[$gameVersion]
+    if (-not $entry) { throw "Version not found in Mojang manifest: $gameVersion" }
+    $versionJsonDownloads += [pscustomobject]@{
+        Url  = [string]$entry.url
+        Path = Join-Path (Join-Path $VersionsDir $gameVersion) "$gameVersion.json"
+        Sha1 = [string]$entry.sha1
+        Size = $entry.size
+    }
+}
+Invoke-Downloads -Downloads $versionJsonDownloads
+
+$javaMajorByGameVersion = @{}
+foreach ($gameVersion in $gameVersions) {
+    $javaMajor = 8
+    $versionJsonPath = Join-Path (Join-Path $VersionsDir $gameVersion) "$gameVersion.json"
+    $versionJson = Get-Content -LiteralPath $versionJsonPath -Raw | ConvertFrom-Json
+    if ($versionJson.javaVersion -and $versionJson.javaVersion.majorVersion) { $javaMajor = [int]$versionJson.javaVersion.majorVersion }
+    $javaMajorByGameVersion[$gameVersion] = $javaMajor
+}
+
 $installJobs = @()
 if ($fabricInstallerPath) {
     $installJobs += [pscustomobject]@{
@@ -482,6 +511,7 @@ if ($neoForgeSelections.Count -gt 0) {
 Write-Host "Installing mod loaders"
 $installJobs | ForEach-Object -Parallel {
     $clientDir = $using:ClientDir
+    $testJarPath = $using:TestJarPath
     $loader = [string]$_.Loader
     foreach ($item in @($_.Items)) {
         $gameVersion = [string]$item.GameVersion
@@ -490,8 +520,7 @@ $installJobs | ForEach-Object -Parallel {
         switch ($loader) {
             "fabric" { & java -jar $installer client -dir $clientDir -mcversion $gameVersion 2>&1 | Out-Null }
             "quilt" { & java -jar $installer install client $gameVersion "--install-dir=$clientDir" 2>&1 | Out-Null }
-            #"forge" { & java -jar $installer --installClient $clientDir 2>&1 | Out-Null }
-            "forge" { & java -cp "$installer;./Test/build/libs/MCCustomSkinLoader-Test-1.0.0.jar" customskinloader.test.installer.Main --installClient $clientDir 2>&1 | Out-Null }
+            "forge" { & java -cp "$installer;$testJarPath" customskinloader.test.installer.Main --installClient $clientDir 2>&1 | Out-Null }
             "neoforge" { & java -jar $installer --installClient $clientDir 2>&1 | Out-Null }
             default { throw "Unknown loader: $loader" }
         }
@@ -500,22 +529,6 @@ $installJobs | ForEach-Object -Parallel {
         }
     }
 } -ThrottleLimit 8
-
-Write-Host "Downloading version JSONs"
-$manifestEntries = @{}
-foreach ($entry in $mojangManifest.versions) { $manifestEntries[[string]$entry.id] = $entry }
-$versionJsonDownloads = @()
-foreach ($gameVersion in $gameVersions) {
-    $entry = $manifestEntries[$gameVersion]
-    if (-not $entry) { throw "Version not found in Mojang manifest: $gameVersion" }
-    $versionJsonDownloads += [pscustomobject]@{
-        Url  = [string]$entry.url
-        Path = Join-Path (Join-Path $VersionsDir $gameVersion) "$gameVersion.json"
-        Sha1 = [string]$entry.sha1
-        Size = $entry.size
-    }
-}
-Invoke-Downloads -Downloads $versionJsonDownloads
 
 Write-Host "Resolving inheritsFrom"
 $versionObjects = [ordered]@{}
@@ -712,6 +725,10 @@ foreach ($versionObject in $allVersions) {
         $gameArguments = @([string]$versionObject.minecraftArguments -split "\s+" | Where-Object { $_ })
     }
 
+    if ($gameArguments -notcontains "--quickPlayMultiplayer") {
+        $gameArguments += @("--server", $ServerAddress, "--port", "$ServerPort")
+    }
+
     $loggingConfigPath = ""
     $logging = $versionObject.logging
     if ($logging -and $logging.client -and $logging.client.file -and $logging.client.file.id -and $logging.client.argument) {
@@ -730,6 +747,7 @@ foreach ($versionObject in $allVersions) {
     $lines.Add('$game_directory = $PSScriptRoot')
     $lines.Add('$assets_root = Join-Path $PSScriptRoot "assets"')
     $lines.Add('$assets_index_name = ' + (ConvertTo-PowerShellLiteral $assetIndexId))
+    $lines.Add('$quickPlayMultiplayer = ' + (ConvertTo-PowerShellLiteral ($ServerAddress + ":" + $ServerPort)))
     $lines.Add('$auth_player_name = "Player"')
     $lines.Add('$auth_uuid = "00000000-0000-0000-0000-000000000000"')
     $lines.Add('$auth_access_token = "0"')
@@ -771,4 +789,47 @@ foreach ($versionObject in $allVersions) {
     Set-Content -LiteralPath (Join-Path $ClientDir "$versionId.ps1") -Value $lines.ToArray() -Encoding utf8
 }
 
+Write-Host "Generating test matrix"
+$clientScriptNames = @(Get-ChildItem -LiteralPath $ClientDir -Filter "*.ps1" -File | Select-Object -ExpandProperty Name)
+$matrixInclude = @()
+foreach ($gameVersion in $gameVersions) {
+    $clients = New-Object System.Collections.Generic.List[string]
+    foreach ($loader in $loaders) {
+        $scriptName = ""
+        switch ($loader) {
+            "fabric" {
+                $found = @($clientScriptNames | Where-Object { $_ -like "fabric-loader-*-$gameVersion.ps1" })
+                if ($found.Count -gt 0) { $scriptName = $found[0] }
+            }
+            "quilt" {
+                $found = @($clientScriptNames | Where-Object { $_ -like "quilt-loader-*-$gameVersion.ps1" })
+                if ($found.Count -gt 0) { $scriptName = $found[0] }
+            }
+            "forge" {
+                $found = @($clientScriptNames | Where-Object { $_ -like "$gameVersion-forge*.ps1" })
+                if ($found.Count -gt 0) { $scriptName = $found[0] }
+            }
+            "neoforge" {
+                $selection = @($neoForgeSelections | Where-Object { $_.GameVersion -eq $gameVersion })
+                if ($selection.Count -gt 0) {
+                    $candidate = "neoforge-$($selection[0].Version).ps1"
+                    if ($clientScriptNames -contains $candidate) { $scriptName = $candidate }
+                }
+            }
+        }
+        if ($scriptName) { [void]$clients.Add($scriptName) }
+    }
+    $matrixInclude += [pscustomobject]@{
+        version = $gameVersion
+        java    = $javaMajorByGameVersion[$gameVersion]
+        clients = $clients.ToArray()
+    }
+}
+$matrixJson = @{ include = $matrixInclude } | ConvertTo-Json -Compress -Depth 8
+if ($env:GITHUB_OUTPUT) {
+    "matrix<<EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+    $matrixJson | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+    "EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+}
+Write-Host $matrixJson
 Write-Host "Done. Generated $($allVersions.Count) launch script(s)"
