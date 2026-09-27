@@ -13,9 +13,11 @@ $QuiltInstallerMetadataUrl = "https://maven.quiltmc.org/repository/release/org/q
 
 $ServerAddress = "127.0.0.1"
 $ServerPort = 25565
-$TestJarPath = Join-Path (Get-Location).Path "Test/build/libs/MCCustomSkinLoader-Test-1.0.0.jar"
+$WorkingDirectory = (Get-Location).Path
+$TestJarPath = Join-Path $WorkingDirectory "Test/build/libs/MCCustomSkinLoader-Test-1.0.0.jar"
+$InstallerLogsDir = Join-Path $WorkingDirectory "installer-logs"
 
-$RunDir = Join-Path (Get-Location).Path "./run"
+$RunDir = Join-Path $WorkingDirectory "./run"
 $ClientDir = Join-Path $RunDir "client"
 $ServerDir = Join-Path $RunDir "server"
 $VersionsDir = Join-Path $ClientDir "versions"
@@ -355,7 +357,7 @@ function Merge-VersionObject {
     }
 }
 
-foreach ($directory in @($RunDir, $ClientDir, $ServerDir, $VersionsDir, $LibrariesDir, $AssetIndexesDir, $AssetObjectsDir, $LogConfigsDir)) {
+foreach ($directory in @($RunDir, $ClientDir, $ServerDir, $VersionsDir, $LibrariesDir, $AssetIndexesDir, $AssetObjectsDir, $LogConfigsDir, $InstallerLogsDir)) {
     New-Item -ItemType Directory -Force -Path $directory | Out-Null
 }
 
@@ -512,17 +514,26 @@ Write-Host "Installing mod loaders"
 $installJobs | ForEach-Object -Parallel {
     $clientDir = $using:ClientDir
     $testJarPath = $using:TestJarPath
+    $installerLogsDir = $using:InstallerLogsDir
+    $workingDirectory = $using:WorkingDirectory
     $loader = [string]$_.Loader
     foreach ($item in @($_.Items)) {
         $gameVersion = [string]$item.GameVersion
         $installer = [string]$item.Installer
+        $installerLog = Join-Path $installerLogsDir "$loader-$gameVersion.log"
+        "[$(Get-Date -Format s)] $loader $gameVersion" | Out-File -FilePath $installerLog -Encoding utf8
         Write-Host "[$loader] installing for $gameVersion"
         switch ($loader) {
-            "fabric" { & java -jar $installer client -dir $clientDir -mcversion $gameVersion 2>&1 | Out-Null }
-            "quilt" { & java -jar $installer install client $gameVersion "--install-dir=$clientDir" 2>&1 | Out-Null }
-            "forge" { & java -cp "$installer;$testJarPath" customskinloader.test.installer.Main --installClient $clientDir 2>&1 | Out-Null }
-            "neoforge" { & java -jar $installer --installClient $clientDir 2>&1 | Out-Null }
+            "fabric" { & java -jar $installer client -dir $clientDir -mcversion $gameVersion 2>&1 | Out-File -FilePath $installerLog -Encoding utf8 -Append }
+            "quilt" { & java -jar $installer install client $gameVersion "--install-dir=$clientDir" 2>&1 | Out-File -FilePath $installerLog -Encoding utf8 -Append }
+            "forge" { & java -cp "$installer;$testJarPath" customskinloader.test.installer.Main --installClient $clientDir 2>&1 | Out-File -FilePath $installerLog -Encoding utf8 -Append }
+            "neoforge" { & java -jar $installer --installClient $clientDir 2>&1 | Out-File -FilePath $installerLog -Encoding utf8 -Append }
             default { throw "Unknown loader: $loader" }
+        }
+        "ExitCode: $LASTEXITCODE" | Out-File -FilePath $installerLog -Encoding utf8 -Append
+        $installerSelfLog = Join-Path $workingDirectory "$(Split-Path -Leaf $installer).log"
+        if (Test-Path -LiteralPath $installerSelfLog) {
+            Move-Item -LiteralPath $installerSelfLog -Destination (Join-Path $installerLogsDir "$loader-$gameVersion-installer.log") -Force
         }
         if ($LASTEXITCODE -ne 0) {
             throw "[$loader] failed to install for $gameVersion (exit code $LASTEXITCODE)"

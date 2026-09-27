@@ -35,6 +35,14 @@ jobs:
           ./Test/gradlew.bat -p Test build --console=plain
           ./.github/scripts/Prepare-TestMatrix.ps1
 
+      - name: Upload installer logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: installer-logs
+          path: installer-logs
+          if-no-files-found: ignore
+
       - name: Cache run
         uses: actions/cache@v6
         with:
