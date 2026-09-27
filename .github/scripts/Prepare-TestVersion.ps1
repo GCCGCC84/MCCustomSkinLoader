@@ -523,8 +523,19 @@ $defaultUserJvmArguments = @(
     "-XX:MaxGCPauseMillis=50"
     "-XX:G1HeapRegionSize=32M"
 )
+$deferredJoinClients = New-Object System.Collections.Generic.List[string]
 foreach ($versionObject in $allVersions) {
     $versionId = [string]$versionObject.id
+    # Some combos must not connect while the game is still loading its resources. Minecraft runs the
+    # server address check (AddressCheck -> BlockListSupplier ServiceLoader) on the connect thread, and
+    # on Quilt <= 1.18.1 that thread loads MojangBlockListSupplier through a different class loader than
+    # the interface, ending in "not a subtype" and a dead connection. Ordinary players join from the
+    # title screen; with --server/--quickPlayMultiplayer the harness is the only thing joining early, so
+    # those combos join from the title screen here as well (Run-TestJob.ps1 drives the menus).
+    $deferredJoin = ($versionId -like 'quilt-loader-*') -and ($MinecraftVersion -in @('1.17', '1.17.1', '1.18', '1.18.1'))
+    $quickPlayBackup = $Features['is_quick_play_multiplayer']
+    if ($deferredJoin) { $Features['is_quick_play_multiplayer'] = $false }
+    try {
     if ($versionObject.arguments) {
         $jvmArguments = @(Expand-ArgumentList $versionObject.arguments.jvm)
         if ($versionObject.arguments.'default-user-jvm') {
@@ -537,8 +548,12 @@ foreach ($versionObject in $allVersions) {
         $jvmArguments = @($legacyJvmArguments) + $defaultUserJvmArguments
         $gameArguments = @([string]$versionObject.minecraftArguments -split "\s+" | Where-Object { $_ })
     }
+    } finally {
+        $Features['is_quick_play_multiplayer'] = $quickPlayBackup
+    }
+    if ($deferredJoin) { [void]$deferredJoinClients.Add("$versionId.ps1") }
 
-    if ($gameArguments -notcontains "--quickPlayMultiplayer") {
+    if (-not $deferredJoin -and $gameArguments -notcontains "--quickPlayMultiplayer") {
         $gameArguments += @("--server", $ServerAddress, "--port", "$ServerPort")
     }
     # Work around the 1.16.4/1.16.5 authlib returning invalid data and disabling multiplayer by setting an invalid proxy address and port.
@@ -625,6 +640,11 @@ foreach ($versionObject in $allVersions) {
     $lines.Add('& $java @jvmArgs $mainClass @gameArgs')
     $lines.Add('exit $LASTEXITCODE')
     Set-Content -LiteralPath (Join-Path $ClientDir "$versionId.ps1") -Value $lines.ToArray() -Encoding utf8
+}
+
+if ($deferredJoinClients.Count -gt 0) {
+    Write-Host "[$(Get-Date -Format s)] Clients that join from the title screen: $($deferredJoinClients -join ', ')"
+    Set-Content -LiteralPath (Join-Path $ClientDir 'deferred-join.txt') -Value $deferredJoinClients.ToArray() -Encoding utf8
 }
 
 if ($env:GITHUB_OUTPUT) {

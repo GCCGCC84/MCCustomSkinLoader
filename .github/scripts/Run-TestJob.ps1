@@ -16,13 +16,20 @@ $ScreenshotsDir = Join-Path $ClientDir "screenshots"
 $CustomSkinLoaderLog = Join-Path $ClientDir "CustomSkinLoader/CustomSkinLoader.log"
 $SkinLoadedMarkers = @("'s profile loaded. (", "Cached profile will be used.")
 $ServerReadyPattern = "Done \("
+# Must match Prepare-TestVersion.ps1: the address the generated launch scripts and the deferred join use.
+$ServerAddress = "127.0.0.1"
+$ServerPort = 25565
 
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 
 public static class TestJobNativeMethods {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr hWnd);
 
@@ -31,6 +38,15 @@ public static class TestJobNativeMethods {
 
     [DllImport("user32.dll")]
     public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+    [DllImport("user32.dll")]
+    public static extern bool GetClientRect(IntPtr hWnd, out RECT rect);
+
+    [DllImport("user32.dll")]
+    public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
 }
 "@
 
@@ -49,6 +65,128 @@ function Stop-ProcessTree {
         taskkill /PID $Process.Id /T /F 2>&1 | Out-Null
         $Process.WaitForExit(30000) | Out-Null
     }
+}
+
+function Get-GameWindow {
+    return (Get-Process -Name java -ErrorAction SilentlyContinue | Where-Object {
+        $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -like "Minecraft*"
+    } | Select-Object -First 1)
+}
+
+function Save-WindowCapture {
+    # PrintWindow capture: works without the window being in the foreground, used as join evidence.
+    param([IntPtr]$Handle, [string]$Path)
+    $rect = New-Object TestJobNativeMethods+RECT
+    if (-not [TestJobNativeMethods]::GetClientRect($Handle, [ref]$rect)) { return $false }
+    $width = $rect.Right - $rect.Left
+    $height = $rect.Bottom - $rect.Top
+    if ($width -le 0 -or $height -le 0) { return $false }
+    $directory = Split-Path -Parent $Path
+    if ($directory -and -not (Test-Path -LiteralPath $directory)) { New-Item -ItemType Directory -Force -Path $directory | Out-Null }
+    $bitmap = New-Object System.Drawing.Bitmap($width, $height)
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    $hdc = $graphics.GetHdc()
+    try {
+        [void][TestJobNativeMethods]::PrintWindow($Handle, $hdc, 1)
+    } finally {
+        $graphics.ReleaseHdc($hdc)
+        $graphics.Dispose()
+    }
+    $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+    $bitmap.Dispose()
+    return $true
+}
+
+function Send-GuiClick {
+    param([IntPtr]$Handle, [int]$X, [int]$Y)
+    $lParam = [IntPtr](($Y -shl 16) -bor ($X -band 0xFFFF))
+    [void][TestJobNativeMethods]::PostMessage($Handle, 0x0201, [IntPtr]1, $lParam)
+    Start-Sleep -Milliseconds 120
+    [void][TestJobNativeMethods]::PostMessage($Handle, 0x0202, [IntPtr]0, $lParam)
+}
+
+function Send-GuiText {
+    param([IntPtr]$Handle, [string]$Text)
+    foreach ($character in $Text.ToCharArray()) {
+        [void][TestJobNativeMethods]::PostMessage($Handle, 0x0102, [IntPtr][int]$character, [IntPtr]1)
+        Start-Sleep -Milliseconds 70
+    }
+}
+
+function Wait-ResourceLoadComplete {
+    # The title screen is only usable after the first resource reload; the atlas marker appears when
+    # the block/item atlases are built. Require it to stay quiet for a few seconds to skip the first
+    # partial reloads.
+    param([string]$LogPath, [int]$HoldSeconds = 8, [int]$TimeoutSeconds = 180)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $seenAt = $null
+    while ((Get-Date) -lt $deadline) {
+        if (Test-Path -LiteralPath $LogPath) {
+            $content = Get-Content -LiteralPath $LogPath -Raw -ErrorAction SilentlyContinue
+            if ($content -match 'Created:.*atlas') {
+                if ($null -eq $seenAt) { $seenAt = Get-Date }
+                elseif (((Get-Date) - $seenAt).TotalSeconds -ge $HoldSeconds) { return $true }
+            }
+        }
+        Start-Sleep -Seconds 2
+    }
+    return $false
+}
+
+function Invoke-DeferredJoin {
+    # Drive the vanilla menus (Multiplayer -> Direct Connection -> address -> Join Server) so the client
+    # connects after the game finished loading, the same way a player does. PostMessage keeps it
+    # independent of window focus.
+    param([string]$ClientName, [string]$GameLogPath, [string]$CaptureDir, [string]$ServerAddress, [int]$ServerPort)
+
+    if (-not (Wait-ResourceLoadComplete -LogPath $GameLogPath)) {
+        Write-Host "[$ClientName] resource reload did not complete before the deferred join"
+        return $false
+    }
+
+    $game = Get-GameWindow
+    if (-not $game) {
+        Write-Host "[$ClientName] Minecraft window not found for deferred join"
+        return $false
+    }
+    $handle = $game.MainWindowHandle
+    Write-Host "[$ClientName] deferred join into $($game.MainWindowTitle)"
+
+    $rect = New-Object TestJobNativeMethods+RECT
+    if (-not [TestJobNativeMethods]::GetClientRect($handle, [ref]$rect)) {
+        Write-Host "[$ClientName] GetClientRect failed for deferred join"
+        return $false
+    }
+    $width = $rect.Right - $rect.Left
+    $height = $rect.Bottom - $rect.Top
+    $guiWidth = [Math]::Ceiling($width / 2.0)
+    $guiHeight = [Math]::Ceiling($height / 2.0)
+    $scaleY = $height / $guiHeight
+    Write-Host "[$ClientName] join window ${width}x${height}, gui=${guiWidth}x${guiHeight}"
+
+    [void][TestJobNativeMethods]::ShowWindow($handle, 9)
+    [void][TestJobNativeMethods]::SetForegroundWindow($handle)
+    Start-Sleep -Milliseconds 500
+    [void](Save-WindowCapture -Handle $handle -Path (Join-Path $CaptureDir 'ui-0-title.png'))
+
+    Send-GuiClick -Handle $handle -X ([int]($width / 2)) -Y ([int](($guiHeight / 4 + 82) * $scaleY))
+    Start-Sleep -Seconds 3
+    [void](Save-WindowCapture -Handle $handle -Path (Join-Path $CaptureDir 'ui-1-multiplayer.png'))
+
+    Send-GuiClick -Handle $handle -X ([int]($width / 2)) -Y ([int](($guiHeight - 42) * $scaleY))
+    Start-Sleep -Seconds 2
+    [void](Save-WindowCapture -Handle $handle -Path (Join-Path $CaptureDir 'ui-2-direct-connect.png'))
+
+    Send-GuiClick -Handle $handle -X ([int]($width / 2)) -Y ([int](126 * $scaleY))
+    Send-GuiText -Handle $handle -Text "${ServerAddress}:$ServerPort"
+    Start-Sleep -Seconds 1
+    [void](Save-WindowCapture -Handle $handle -Path (Join-Path $CaptureDir 'ui-3-address.png'))
+
+    Send-GuiClick -Handle $handle -X ([int]($width / 2)) -Y ([int](($guiHeight / 4 + 118) * $scaleY))
+    Start-Sleep -Seconds 3
+    [void](Save-WindowCapture -Handle $handle -Path (Join-Path $CaptureDir 'ui-4-joining.png'))
+    Write-Host "[$ClientName] deferred join submitted for ${ServerAddress}:$ServerPort"
+    return $true
 }
 
 function Send-GameKeys {
@@ -80,6 +218,15 @@ function Send-GameKeys {
 }
 
 New-Item -ItemType Directory -Force -Path $ClientLogDir, $ScreenshotsDir | Out-Null
+
+# Clients listed here were started without --server/--quickPlayMultiplayer and have to join through the
+# game menus (see Prepare-TestVersion.ps1).
+$DeferredJoinClients = @()
+$deferredJoinFile = Join-Path $ClientDir 'deferred-join.txt'
+if (Test-Path -LiteralPath $deferredJoinFile) {
+    $DeferredJoinClients = @(Get-Content -LiteralPath $deferredJoinFile | Where-Object { $_ })
+}
+$DeferredJoinCaptureDir = Join-Path $ClientLogDir 'deferred-join'
 
 $serverJar = Join-Path $ServerDir "$MinecraftVersion.jar"
 if (-not (Test-Path -LiteralPath $serverJar)) {
@@ -133,6 +280,11 @@ if ($serverReady) {
         Write-Host "[$clientName] launching"
         $command = "& '$clientScript' 2>&1 | Tee-Object -FilePath '$clientOut'"
         $client = Start-Process -FilePath "pwsh" -ArgumentList @("-NoProfile", "-Command", $command) -WorkingDirectory $ClientDir -PassThru -NoNewWindow
+
+        if ($DeferredJoinClients -contains $clientName) {
+            [void](Invoke-DeferredJoin -ClientName $clientName -GameLogPath (Join-Path $ClientLogDir 'latest.log') `
+                -CaptureDir $DeferredJoinCaptureDir -ServerAddress $ServerAddress -ServerPort $ServerPort)
+        }
 
         $clientLineCount = 0
         $cslLineCount = 0
