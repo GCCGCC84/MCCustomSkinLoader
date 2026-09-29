@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory = $true)][string]$MinecraftJsonUrl,
     [string]$MinecraftJsonSha1 = "",
     [string]$InstallersJson = $env:INSTALLERS,
-    [string]$RunDir = "run"
+    [string]$RunDir = "Test/run"
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,7 +14,7 @@ $ThrottleLimit = 32
 $ServerAddress = "127.0.0.1"
 $ServerPort = 25565
 $WorkingDirectory = (Get-Location).Path
-$TestJarPath = Join-Path $WorkingDirectory "Test/build/libs/MCCustomSkinLoader-Test-1.0.0.jar"
+$TestJarPath = Join-Path $WorkingDirectory "Test/run/client/CustomSkinLoader-Test-1.0.0.jar"
 $InstallerLogsDir = Join-Path $WorkingDirectory "installer-logs"
 $InstallerJava = Join-Path $env:JAVA_HOME_25_X64 "bin/java.exe"
 
@@ -71,7 +71,7 @@ function Invoke-Downloads {
             try {
                 if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force }
                 Invoke-WebRequest -Uri $url -OutFile $temp -TimeoutSec 10
-                if (-not (& $isValid $temp)) { throw "SHA1/size verification failed" }
+                if (-not (& $isValid $temp)) { throw "SHA1 verification failed" }
                 Move-Item -LiteralPath $temp -Destination $path -Force
                 return
             } catch {
@@ -226,13 +226,6 @@ function Resolve-VersionObject {
 
 foreach ($directory in @($RunDir, $ClientDir, $ServerDir, $VersionsDir, $LibrariesDir, $AssetIndexesDir, $AssetObjectsDir, $LogConfigsDir, $InstallerLogsDir)) {
     New-Item -ItemType Directory -Force -Path $directory | Out-Null
-}
-
-$testRunDir = Join-Path $WorkingDirectory "Test/run"
-if (Test-Path -LiteralPath $testRunDir) {
-    Get-ChildItem -LiteralPath $testRunDir -Force | ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination $RunDir -Recurse -Force
-    }
 }
 
 $info = Get-Content -LiteralPath "build.info.json" -Raw | ConvertFrom-Json
@@ -509,8 +502,6 @@ foreach ($versionObject in $allVersions) {
     if ($gameArguments -notcontains "--quickPlayMultiplayer") {
         $gameArguments += @("--server", $ServerAddress, "--port", "$ServerPort")
     }
-    # Work around the 1.16.4/1.16.5 authlib returning invalid data and disabling multiplayer by setting an invalid proxy address and port.
-    $gameArguments += @("--proxyHost", $ServerAddress, "--proxyPort", "$ServerPort")
 
     $loggingConfigPath = ""
     $logging = $versionObject.logging
@@ -523,7 +514,10 @@ foreach ($versionObject in $allVersions) {
     $seenLibraries = @{}
     foreach ($library in @($versionObject.libraries)) {
         if (-not (Test-Rules $library.rules)) { continue }
-        $key = [string]$library.name
+        $libraryParts = @([string]$library.name -split ":")
+        if ($libraryParts.Count -lt 3) { $key = [string]$library.name }
+        elseif ($libraryParts.Count -ge 4 -and $libraryParts[3]) { $key = "$($libraryParts[0]):$($libraryParts[1]):$($libraryParts[3])" }
+        else { $key = "$($libraryParts[0]):$($libraryParts[1])" }
         if ($seenLibraries.ContainsKey($key)) { continue }
         $seenLibraries[$key] = $true
         $classpathArtifact = Get-LibraryArtifact $library
