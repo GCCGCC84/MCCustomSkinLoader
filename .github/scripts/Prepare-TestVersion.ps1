@@ -17,6 +17,7 @@ $WorkingDirectory = (Get-Location).Path
 $TestJarPath = Join-Path $WorkingDirectory "Test/run/client/CustomSkinLoader-Test-1.0.0.jar"
 $InstallerLogsDir = Join-Path $WorkingDirectory "installer-logs"
 $InstallerJava = Join-Path $env:JAVA_HOME_25_X64 "bin/java.exe"
+$ExternalArgs = Import-PowerShellDataFile -LiteralPath (Join-Path $PSScriptRoot "ExternalArgs.psd1")
 
 $OsName = "windows"
 $OsArch = if ([Environment]::Is64BitOperatingSystem) { "x86_64" } else { "x86" }
@@ -246,6 +247,7 @@ if ($versionJson.javaVersion -and $versionJson.javaVersion.majorVersion) {
 
 $installers = @($InstallersJson | ConvertFrom-Json)
 $clients = New-Object System.Collections.Generic.List[string]
+$clientLoaders = @{}
 
 $installerDownloads = @()
 foreach ($installer in $installers) {
@@ -290,6 +292,7 @@ foreach ($installer in $installers) {
         throw "[$loader] expected one installed version for $MinecraftVersion, got $($newVersions.Count)"
     }
     [void]$clients.Add("$($newVersions[0].Name).ps1")
+    $clientLoaders[[string]$newVersions[0].Name] = $loader
 }
 
 Write-Host "[$(Get-Date -Format s)] Resolving inheritsFrom"
@@ -486,6 +489,26 @@ $defaultUserJvmArguments = @(
 )
 foreach ($versionObject in $allVersions) {
     $versionId = [string]$versionObject.id
+    $extraJvmArguments = @()
+    $extraGameArguments = @()
+    if ($clientLoaders.ContainsKey($versionId)) {
+        $loader = [string]$clientLoaders[$versionId]
+        $gameVersion = [version]$MinecraftVersion
+        foreach ($entry in @($ExternalArgs.Args)) {
+            $matched = $false
+            foreach ($rule in @($entry.Matrix)) {
+                if (@($rule.Loaders) -notcontains $loader) { continue }
+                $range = @($rule.VersionRange)
+                for ($index = 0; $index + 1 -lt $range.Count; $index += 2) {
+                    if ($gameVersion -ge [version]([string]$range[$index]) -and $gameVersion -le [version]([string]$range[$index + 1])) { $matched = $true; break }
+                }
+                if ($matched) { break }
+            }
+            if (-not $matched) { continue }
+            if ($entry.JvmArgs) { $extraJvmArguments += @([string]$entry.JvmArgs -split "\s+" | Where-Object { $_ }) }
+            if ($entry.AppArgs) { $extraGameArguments += @([string]$entry.AppArgs -split "\s+" | Where-Object { $_ }) }
+        }
+    }
     if ($versionObject.arguments) {
         $jvmArguments = @(Expand-ArgumentList $versionObject.arguments.jvm)
         if ($versionObject.arguments.'default-user-jvm') {
@@ -509,6 +532,9 @@ foreach ($versionObject in $allVersions) {
         $loggingConfigPath = "assets/log_configs/$($logging.client.file.id)"
         $jvmArguments += ([string]$logging.client.argument).Replace('${path}', '${logging_config_path}')
     }
+
+    $jvmArguments += $extraJvmArguments
+    $gameArguments += $extraGameArguments
 
     $classpathPaths = @()
     $seenLibraries = @{}

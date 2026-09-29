@@ -17,20 +17,16 @@ $CustomSkinLoaderLog = Join-Path $ClientDir "CustomSkinLoader/CustomSkinLoader.l
 $SkinLoadedMarkers = @("'s profile loaded. (", "Cached profile will be used.")
 $ServerReadyPattern = "Done \("
 
-Add-Type -AssemblyName System.Windows.Forms
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 
 public static class TestJobNativeMethods {
     [DllImport("user32.dll")]
-    public static extern bool SetForegroundWindow(IntPtr hWnd);
+    public static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 
     [DllImport("user32.dll")]
-    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-
-    [DllImport("user32.dll")]
-    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+    public static extern uint MapVirtualKey(uint uCode, uint uMapType);
 }
 "@
 
@@ -51,6 +47,16 @@ function Stop-ProcessTree {
     }
 }
 
+function Send-GameKey {
+    param([IntPtr]$Window, [int]$VirtualKey, [bool]$Down)
+    $scan = [long][TestJobNativeMethods]::MapVirtualKey([uint32]$VirtualKey, 0)
+    if ($Down) {
+        [TestJobNativeMethods]::SendMessage($Window, 0x0100, [IntPtr]$VirtualKey, [IntPtr](1 -bor ($scan -shl 16))) | Out-Null
+    } else {
+        [TestJobNativeMethods]::SendMessage($Window, 0x0101, [IntPtr]$VirtualKey, [IntPtr](0xC0000001 -bor ($scan -shl 16))) | Out-Null
+    }
+}
+
 function Send-GameKeys {
     $game = Get-Process -Name java -ErrorAction SilentlyContinue | Where-Object {
         $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -like "Minecraft*"
@@ -60,16 +66,16 @@ function Send-GameKeys {
         return $false
     }
     Write-Host "[keys] window: $($game.MainWindowTitle)"
-    [TestJobNativeMethods]::ShowWindow($game.MainWindowHandle, 9) | Out-Null
-    [TestJobNativeMethods]::SetForegroundWindow($game.MainWindowHandle) | Out-Null
-    Start-Sleep -Milliseconds 1000
-    [System.Windows.Forms.SendKeys]::SendWait("{F5}")
+    $window = $game.MainWindowHandle
+    Send-GameKey -Window $window -VirtualKey 0x74 -Down $true
+    Send-GameKey -Window $window -VirtualKey 0x74 -Down $false
     Start-Sleep -Milliseconds 500
-    [TestJobNativeMethods]::keybd_event(0x09, 0, 0, [UIntPtr]::Zero)
+    Send-GameKey -Window $window -VirtualKey 0x09 -Down $true
     Start-Sleep -Milliseconds 500
-    [System.Windows.Forms.SendKeys]::SendWait("{F2}")
+    Send-GameKey -Window $window -VirtualKey 0x71 -Down $true
+    Send-GameKey -Window $window -VirtualKey 0x71 -Down $false
     Start-Sleep -Milliseconds 500
-    [TestJobNativeMethods]::keybd_event(0x09, 0, 2, [UIntPtr]::Zero)
+    Send-GameKey -Window $window -VirtualKey 0x09 -Down $false
     return $true
 }
 
