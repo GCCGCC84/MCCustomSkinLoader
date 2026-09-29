@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$MinecraftVersion,
     [Parameter(Mandatory = $true)][string]$Clients,
-    [string]$RunDir = "run"
+    [string]$RunDir = "Test/run"
 )
 
 $ErrorActionPreference = "Stop"
