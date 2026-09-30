@@ -21,43 +21,128 @@ import org.objectweb.asm.tree.VarInsnNode;
 
 public final class Agent implements Opcodes {
     private static final String[] DEFAULT_TARGET_CLASSES = {"net.minecraft.class_310", "net.minecraft.client.Minecraft"};
+    private static final String[] GAME_CLASSES = {"net.minecraft.client.Minecraft", "net.minecraft.class_310"};
+    private static final String[] PRELOAD_CLASSES = {
+        "net.minecraftforge.fml.network.FMLNetworkConstants",
+        "net.minecraftforge.fml.network.NetworkInitialization",
+        "net.minecraftforge.fml.network.NetworkRegistry",
+        "net.minecraftforge.fml.network.NetworkRegistry$ChannelBuilder",
+        "net.minecraftforge.fml.network.NetworkRegistry$LoginPayload",
+        "net.minecraftforge.fml.network.NetworkInstance",
+        "net.minecraftforge.fml.network.NetworkDirection",
+        "net.minecraftforge.fml.network.NetworkEvent",
+        "net.minecraftforge.fml.network.NetworkEvent$Context",
+        "net.minecraftforge.fml.network.NetworkEvent$LoginPayloadEvent",
+        "net.minecraftforge.fml.network.NetworkEvent$ClientCustomPayloadEvent",
+        "net.minecraftforge.fml.network.NetworkEvent$ServerCustomPayloadEvent",
+        "net.minecraftforge.fml.network.NetworkEvent$ClientCustomPayloadLoginEvent",
+        "net.minecraftforge.fml.network.NetworkEvent$ServerCustomPayloadLoginEvent",
+        "net.minecraftforge.fml.network.NetworkEvent$GatherLoginPayloadsEvent",
+        "net.minecraftforge.fml.network.simple.SimpleChannel",
+        "net.minecraftforge.fml.network.simple.SimpleChannel$MessageBuilder",
+        "net.minecraftforge.fml.network.simple.IndexedMessageCodec",
+        "net.minecraftforge.fml.network.simple.IndexedMessageCodec$MessageHandler",
+        "net.minecraftforge.fml.network.FMLHandshakeHandler",
+        "net.minecraftforge.fml.network.FMLLoginWrapper",
+        "net.minecraftforge.fml.network.FMLHandshakeMessages",
+        "net.minecraftforge.fml.network.FMLHandshakeMessages$C2SAcknowledge",
+        "net.minecraftforge.fml.network.FMLHandshakeMessages$LoginIndexedMessage",
+        "net.minecraftforge.fml.network.FMLHandshakeMessages$S2CModList",
+        "net.minecraftforge.fml.network.FMLHandshakeMessages$C2SModListReply",
+        "net.minecraftforge.fml.network.FMLHandshakeMessages$S2CRegistry",
+        "net.minecraftforge.fml.network.FMLHandshakeMessages$S2CConfigData",
+        "net.minecraftforge.fml.network.FMLPlayMessages",
+        "net.minecraftforge.fml.network.FMLPlayMessages$OpenContainer",
+        "net.minecraftforge.fml.network.FMLPlayMessages$SpawnEntity",
+        "net.minecraftforge.fml.network.event.EventNetworkChannel",
+        "net.minecraftforge.fml.network.ConnectionType",
+        "net.minecraftforge.fml.network.ICustomPacket",
+        "net.minecraftforge.fml.network.PacketDispatcher",
+        "net.minecraftforge.fml.util.ThreeConsumer"
+    };
 
     private Agent() {
     }
 
     public static void premain(String agentArgs, Instrumentation instrumentation) {
-        final Set<String> targetClasses = parseTargetClasses(agentArgs);
-        instrumentation.addTransformer(new ClassFileTransformer() {
-            @Override
-            public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined, ProtectionDomain protectionDomain, byte[] classfileBuffer) {
-                if (className == null || !targetClasses.contains(className)) {
-                    return null;
-                }
-                return patchClass(classfileBuffer);
-            }
-        });
-    }
-
-    private static Set<String> parseTargetClasses(String agentArgs) {
         Set<String> targetClasses = new LinkedHashSet<String>();
+        boolean migrateIcon = false;
+        boolean preloadForgeNetwork = false;
         if (agentArgs != null) {
             for (String argument : agentArgs.split(",")) {
-                String className = argument.trim();
-                int separator = className.indexOf('=');
-                if (separator >= 0) {
-                    className = className.substring(separator + 1).trim();
+                String token = argument.trim();
+                int separator = token.indexOf('=');
+                String name = separator >= 0 ? token.substring(0, separator).trim() : token;
+                String value = separator >= 0 ? token.substring(separator + 1).trim() : "";
+                if ("icon".equals(name)) {
+                    migrateIcon = true;
+                    if (!value.isEmpty()) {
+                        targetClasses.add(value.replace('.', '/'));
+                    }
+                } else if ("preload".equals(name) && value.isEmpty()) {
+                    preloadForgeNetwork = true;
                 }
-                if (!className.isEmpty()) {
+            }
+        }
+        if (migrateIcon) {
+            if (targetClasses.isEmpty()) {
+                for (String className : DEFAULT_TARGET_CLASSES) {
                     targetClasses.add(className.replace('.', '/'));
                 }
             }
+            final Set<String> classes = targetClasses;
+            instrumentation.addTransformer(new ClassFileTransformer() {
+                @Override
+                public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined, ProtectionDomain protectionDomain, byte[] classfileBuffer) {
+                    if (className == null || !classes.contains(className)) {
+                        return null;
+                    }
+                    return patchClass(classfileBuffer);
+                }
+            });
         }
-        if (targetClasses.isEmpty()) {
-            for (String className : DEFAULT_TARGET_CLASSES) {
-                targetClasses.add(className);
-            }
+        if (preloadForgeNetwork) {
+            Thread preloadThread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    ClassLoader loader = null;
+                    while (loader == null) {
+                        for (Thread thread : Thread.getAllStackTraces().keySet()) {
+                            ClassLoader candidate = thread.getContextClassLoader();
+                            if (candidate == null) {
+                                continue;
+                            }
+                            for (String gameClass : GAME_CLASSES) {
+                                try {
+                                    Class.forName(gameClass, false, candidate);
+                                    loader = candidate;
+                                    break;
+                                } catch (Throwable ignored) {
+                                }
+                            }
+                            if (loader != null) {
+                                break;
+                            }
+                        }
+                        if (loader == null) {
+                            try {
+                                Thread.sleep(100L);
+                            } catch (InterruptedException e) {
+                                return;
+                            }
+                        }
+                    }
+                    for (String className : PRELOAD_CLASSES) {
+                        try {
+                            Class.forName(className, false, loader);
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                }
+            }, "CustomSkinLoader-Test-Preload");
+            preloadThread.setDaemon(true);
+            preloadThread.start();
         }
-        return targetClasses;
     }
 
     static byte[] patchClass(byte[] classfileBuffer) {

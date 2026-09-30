@@ -104,9 +104,23 @@ jobs:
           name: test-diagnostics-${{ matrix.version }}
           path: |
             installer-logs
-            run/client/crash-reports
-            run/client/logs
-            run/client/CustomSkinLoader/CustomSkinLoader.log
-            run/client/hs_err*
-            run/client/screenshots
+            Test/run/client/crash-reports
+            Test/run/client/logs
+            Test/run/client/CustomSkinLoader/CustomSkinLoader.log
+            Test/run/client/hs_err*
+            Test/run/client/screenshots
           if-no-files-found: ignore
+
+  merge-diagnostics:
+    name: Merge Diagnostics
+    needs: test
+    runs-on: windows-latest
+
+    steps:
+      - name: Merge diagnostics artifacts
+        uses: actions/upload-artifact/merge@v7
+        with:
+          name: all-test-diagnostics
+          pattern: test-diagnostics-*
+          separate-directories: true
+          delete-merged: true

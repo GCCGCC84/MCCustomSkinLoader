@@ -1,3 +1,5 @@
+# This configuration file contains workarounds for various issues unrelated to this mod
+# that may occur when running CI tests on certain Minecraft versions.
 @{
     Args = @(
         @{ #
@@ -5,13 +7,18 @@
                 @{
                     Loaders = @('fabric', 'quilt')
                     VersionRange = @('1.14', '1.17')
-                },
-                @{
-                    Loaders = @('forge')
-                    VersionRange = @('1.14.2', '1.14.3')
                 }
             )
-            JvmArgs = '-javaagent:CustomSkinLoader-Test-1.0.0.jar'
+            JvmArgs = '-javaagent:CustomSkinLoader-Test-1.0.0.jar:icon'
+        },
+        @{ #
+            Matrix = @(
+                @{
+                    Loaders = @('forge')
+                    VersionRange = @('1.13.2', '1.14.3')
+                }
+            )
+            JvmArgs = '-javaagent:CustomSkinLoader-Test-1.0.0.jar:icon,preload'
         },
         @{ # Work around the 1.16.4/1.16.5 authlib returning invalid data and disabling multiplayer by setting an invalid proxy address.
             Matrix = @(
