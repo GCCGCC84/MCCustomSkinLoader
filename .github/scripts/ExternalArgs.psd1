@@ -31,6 +31,19 @@
                 @{
                     Loaders = @('fabric', 'quilt')
                     VersionRange = @('1.14', '1.17')
+                },
+                @{
+                    # The old game-test harness covered these with its own deferred join; the current
+                    # harness only passes the server address. Forge 1.15/1.15.1 raise
+                    # ReportedException "Rendering overlay" while ConnectingScreen is created, Quilt
+                    # 1.18/1.18.2 crash with an NPE in ShaderInstance.getUniform() and Quilt 1.19.1
+                    # connects but never finishes the first resource reload.
+                    Loaders = @('forge')
+                    VersionRange = @('1.15', '1.15.1')
+                },
+                @{
+                    Loaders = @('quilt')
+                    VersionRange = @('1.18', '1.18', '1.18.2', '1.18.2', '1.19.1', '1.19.1')
                 }
             )
             JvmArgs = '-javaagent:CustomSkinLoader-Test-1.0.0.jar=deferJoin'

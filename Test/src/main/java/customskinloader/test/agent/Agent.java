@@ -5,9 +5,7 @@ import java.lang.instrument.Instrumentation;
 import java.security.ProtectionDomain;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.objectweb.asm.ClassReader;
@@ -39,19 +37,15 @@ import org.objectweb.asm.tree.MethodNode;
  */
 public final class Agent implements Opcodes {
     /**
-     * Minecraft in the mapping namespaces the game tests run under: Mojmap/SRG on Forge, NeoForge and
-     * Mojang-named clients ("net.minecraft.client.Minecraft"), intermediary on Fabric and Quilt
-     * ("net.minecraft.class_310"). ClassFileTransformer gets the internal form with '/' separators,
-     * so the names must not be written with dots here.
+     * Tells Minecraft's class apart from the thousands of other classes without hardcoding a name:
+     * the constructor loads the window icon from this resource in every version the game tests patch,
+     * and the string survives both remapping and deobfuscation. Mapping names cannot be used here,
+     * because the same class is 'dvv' in an obfuscated jar, 'net.minecraft.client.Minecraft' on
+     * Mojmap/SRG clients and an intermediary name on Fabric/Quilt that is not even stable across
+     * versions (1.14.1 uses net.minecraft.class_355 where 1.15.2 uses net.minecraft.class_310).
+     * Nothing in this agent patches the icon itself.
      */
-    private static final String[] GAME_CLASSES = {"net.minecraft/client/Minecraft", "net.minecraft/class_310"};
-
-    /**
-     * Locates Minecraft's constructor: the only method of the class that loads the window icon
-     * resource. Nothing in this agent patches the icon itself, the string is only used to tell
-     * Minecraft apart from other classes in every mapping namespace.
-     */
-    private static final String ICON_RESOURCE = "icons/icon_16x16.png";
+    private static final String GAME_MARKER = "icons/icon_16x16.png";
 
     /**
      * Forge ModLauncher network classes (1.13.2-1.14.3). The login handshake resolves them lazily
@@ -119,10 +113,10 @@ public final class Agent implements Opcodes {
         // Fixed application order instead of argument order: allowMultiplayer edits the permission
         // branch in front of the address check, which deferJoin then relocates behind it.
         if (requested.contains("allowMultiplayer")) {
-            installTransformer(instrumentation, "allowMultiplayer", GAME_CLASSES, Agent::allowMultiplayer);
+            installGameTransformer(instrumentation, "allowMultiplayer", Agent::allowMultiplayer);
         }
         if (requested.contains("deferJoin")) {
-            installTransformer(instrumentation, "deferJoin", GAME_CLASSES, Agent::deferJoin);
+            installGameTransformer(instrumentation, "deferJoin", Agent::deferJoin);
         }
         if (requested.contains("preloadForgeNetwork")) {
             installPreloadTrigger(instrumentation);
@@ -147,12 +141,15 @@ public final class Agent implements Opcodes {
         System.out.println("[agent] " + message);
     }
 
-    private static void installTransformer(Instrumentation instrumentation, final String workaround, String[] targetClasses, final Patch patch) {
-        final Set<String> targets = new LinkedHashSet<String>(Arrays.asList(targetClasses));
+    /**
+     * Registers a patch for the class that carries {@link #GAME_MARKER}. The marker is searched in the
+     * raw class file, so the ASM round trip only happens for the handful of classes that mention it.
+     */
+    private static void installGameTransformer(Instrumentation instrumentation, final String workaround, final Patch patch) {
         instrumentation.addTransformer(new ClassFileTransformer() {
             @Override
             public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined, ProtectionDomain protectionDomain, byte[] classfileBuffer) {
-                if (className == null || !targets.contains(className)) {
+                if (className == null || !containsGameMarker(classfileBuffer)) {
                     return null;
                 }
                 try {
@@ -178,6 +175,20 @@ public final class Agent implements Opcodes {
         });
     }
 
+    private static boolean containsGameMarker(byte[] classfileBuffer) {
+        byte[] marker = GAME_MARKER.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        nextCandidate:
+        for (int start = 0; start + marker.length <= classfileBuffer.length; start++) {
+            for (int offset = 0; offset < marker.length; offset++) {
+                if (classfileBuffer[start + offset] != marker[offset]) {
+                    continue nextCandidate;
+                }
+            }
+            return true;
+        }
+        return false;
+    }
+
     /**
      * Drops the multiplayer permission gate in front of the server address. 1.16.4 introduced
      * {@code if (allowsMultiplayer() && serverAddress != null)} in Minecraft's constructor, and
@@ -190,7 +201,7 @@ public final class Agent implements Opcodes {
     private static boolean allowMultiplayer(ClassNode classNode) {
         MethodNode constructor = findGameConstructor(classNode);
         if (constructor == null) {
-            log("allowMultiplayer: no constructor loads " + ICON_RESOURCE);
+            log("allowMultiplayer: no constructor loads " + GAME_MARKER);
             return false;
         }
         // The gate and the "serverData.address == null" test branch to the same label, i.e.
@@ -230,7 +241,7 @@ public final class Agent implements Opcodes {
     private static boolean deferJoin(ClassNode classNode) {
         MethodNode constructor = findGameConstructor(classNode);
         if (constructor == null) {
-            log("deferJoin: no constructor loads " + ICON_RESOURCE);
+            log("deferJoin: no constructor loads " + GAME_MARKER);
             return false;
         }
 
@@ -284,12 +295,11 @@ public final class Agent implements Opcodes {
      * transformation.
      */
     private static void installPreloadTrigger(Instrumentation instrumentation) {
-        final Set<String> targets = new LinkedHashSet<String>(Arrays.asList(GAME_CLASSES));
         final AtomicBoolean triggered = new AtomicBoolean(false);
         instrumentation.addTransformer(new ClassFileTransformer() {
             @Override
             public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined, ProtectionDomain protectionDomain, byte[] classfileBuffer) {
-                if (className == null || loader == null || !targets.contains(className) || !triggered.compareAndSet(false, true)) {
+                if (className == null || loader == null || !containsGameMarker(classfileBuffer) || !triggered.compareAndSet(false, true)) {
                     return null;
                 }
                 log("preloadForgeNetwork: game class loader seen on " + className);
@@ -317,7 +327,7 @@ public final class Agent implements Opcodes {
 
     private static MethodNode findGameConstructor(ClassNode classNode) {
         for (MethodNode methodNode : classNode.methods) {
-            if (containsIconResource(methodNode)) {
+            if (loadsIconResource(methodNode)) {
                 return methodNode;
             }
         }
@@ -347,9 +357,9 @@ public final class Agent implements Opcodes {
         return null;
     }
 
-    private static boolean containsIconResource(MethodNode methodNode) {
+    private static boolean loadsIconResource(MethodNode methodNode) {
         for (AbstractInsnNode current = methodNode.instructions.getFirst(); current != null; current = current.getNext()) {
-            if (current instanceof LdcInsnNode && ICON_RESOURCE.equals(((LdcInsnNode) current).cst)) {
+            if (current instanceof LdcInsnNode && GAME_MARKER.equals(((LdcInsnNode) current).cst)) {
                 return true;
             }
         }
