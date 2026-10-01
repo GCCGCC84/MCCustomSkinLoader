@@ -334,10 +334,9 @@ public final class Agent implements Opcodes {
         for (MethodInsnNode setter : setters) {
             MethodNode setterMethod = findMethod(classNode, setter.name, setter.desc);
             InsnList hook = new InsnList();
-            hook.add(new VarInsnNode(ALOAD, 0));
             hook.add(new VarInsnNode(ALOAD, 1));
             hook.add(new LdcInsnNode(setter.name + setter.desc));
-            hook.add(new MethodInsnNode(INVOKESTATIC, BRIDGE_CLASS, "onSet", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/String;)V", false));
+            hook.add(new MethodInsnNode(INVOKESTATIC, BRIDGE_CLASS, "onSet", "(Ljava/lang/Object;Ljava/lang/String;)V", false));
             setterMethod.instructions.insert(hook);
             if (hooked.length() > 0) {
                 hooked.append(", ");
