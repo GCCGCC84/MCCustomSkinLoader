@@ -18,6 +18,7 @@ import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TryCatchBlockNode;
 
 /**
  * Test-only java agent carrying the workarounds for game-test failures that are caused by the
@@ -46,6 +47,13 @@ public final class Agent implements Opcodes {
      * Nothing in this agent patches the icon itself.
      */
     private static final String GAME_MARKER = "icons/icon_16x16.png";
+
+    /**
+     * Upper bound for the block deferJoin relocates. The vanilla constructors of 1.14-1.19 move
+     * between 26 and 44 instructions; anything larger means the heuristic anchored on the wrong
+     * block.
+     */
+    private static final int MAX_MOVED_INSTRUCTIONS = 64;
 
     /**
      * Forge ModLauncher network classes (1.13.2-1.14.3). The login handshake resolves them lazily
@@ -255,18 +263,10 @@ public final class Agent implements Opcodes {
             return false;
         }
 
-        // Leave the class alone unless the block really builds a screen: moving an unrelated block
-        // would be worse than not applying the workaround at all.
         AbstractInsnNode stop = ((JumpInsnNode) gotoNode).label.getNext();
-        boolean buildsScreen = false;
-        for (AbstractInsnNode current = addressNode; current != null && current != stop; current = current.getNext()) {
-            if (current.getOpcode() == NEW) {
-                buildsScreen = true;
-                break;
-            }
-        }
-        if (!buildsScreen) {
-            log("deferJoin: no screen construction after the address check in " + constructor.name);
+        String rejection = rejectMovedRange(constructor, addressNode, stop);
+        if (rejection != null) {
+            log("deferJoin: " + rejection + " in " + constructor.name + ", left unchanged");
             return false;
         }
 
@@ -278,14 +278,65 @@ public final class Agent implements Opcodes {
             current = next;
         }
         int movedCount = moved.size();
-        if (movedCount == 0) {
-            log("deferJoin: nothing to move in " + constructor.name);
-            return false;
-        }
         // insertBefore(InsnList) hands the instructions over to the target list, so count first.
         instructions.insertBefore(returnNode, moved);
         log("deferJoin: moved " + movedCount + " instruction(s) behind the rest of " + constructor.name);
         return true;
+    }
+
+    /**
+     * Tells whether moving [start, stop) would produce a class the verifier accepts, and returns the
+     * reason when it would not. The vanilla constructor of 1.15/1.16 moves 26 instructions, but on
+     * 1.14 the same pattern matched 778 instructions and the client died with "VerifyError: Bad local
+     * variable type": a block that carries a screen construction, stays within these bounds and stays
+     * out of every exception handler and branch target is safe, anything else is left alone.
+     */
+    private static String rejectMovedRange(MethodNode constructor, AbstractInsnNode start, AbstractInsnNode stop) {
+        int size = 0;
+        boolean buildsScreen = false;
+        for (AbstractInsnNode current = start; current != null && current != stop; current = current.getNext()) {
+            size++;
+            if (current.getOpcode() == NEW) {
+                buildsScreen = true;
+            }
+            if (current instanceof JumpInsnNode && !within(((JumpInsnNode) current).label, start, stop)) {
+                return "the block branches out of itself";
+            }
+        }
+        if (!buildsScreen) {
+            return "no screen construction after the address check";
+        }
+        if (size > MAX_MOVED_INSTRUCTIONS) {
+            return "the block has " + size + " instructions (limit " + MAX_MOVED_INSTRUCTIONS + ")";
+        }
+        for (AbstractInsnNode current = constructor.instructions.getFirst(); current != null; current = current.getNext()) {
+            if (current instanceof JumpInsnNode && !within(current, start, stop) && within(((JumpInsnNode) current).label, start, stop)) {
+                return "code outside the block branches into it";
+            }
+        }
+        for (Object block : constructor.tryCatchBlocks) {
+            TryCatchBlockNode tryCatch = (TryCatchBlockNode) block;
+            if (overlaps(tryCatch.start, start, stop) || overlaps(tryCatch.end, start, stop) || overlaps(tryCatch.handler, start, stop)) {
+                if (!(within(tryCatch.start, start, stop) && within(tryCatch.end, start, stop) && within(tryCatch.handler, start, stop))) {
+                    return "the block cuts through an exception handler";
+                }
+            }
+        }
+        return null;
+    }
+
+    private static boolean within(AbstractInsnNode node, AbstractInsnNode start, AbstractInsnNode stop) {
+        for (AbstractInsnNode current = start; current != null && current != stop; current = current.getNext()) {
+            if (current == node) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** True when the node is one of the range bounds or sits between them. */
+    private static boolean overlaps(AbstractInsnNode node, AbstractInsnNode start, AbstractInsnNode stop) {
+        return within(node, start, stop) || node == stop;
     }
 
     /**
