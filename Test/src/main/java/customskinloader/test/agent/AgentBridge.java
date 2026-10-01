@@ -53,29 +53,8 @@ public final class AgentBridge {
         host = null;
         port = 0;
         extras = null;
-        final Runnable join = new Runnable() {
-            @Override
-            public void run() {
-                joinNow(instance, address, addressPort, extraLocals);
-            }
-        };
-        // Running this inside the callback would run it inside the render thread's resource reload path,
-        // and Quilt 1.15.2 hung right after such a join. Hand it to the game's own task queue instead -
-        // any void method taking a single Runnable, found by shape, so no mapping name is involved -
-        // which runs it at the next safe point of the main loop.
-        Method executor = findExecutor(instance);
-        if (executor == null) {
-            System.out.println("[agent] deferJoin: overlay cleared by " + setter + ", no task queue, joining inline");
-            join.run();
-            return;
-        }
-        try {
-            System.out.println("[agent] deferJoin: overlay cleared by " + setter + ", joining on the game thread");
-            executor.invoke(instance, join);
-        } catch (Throwable throwable) {
-            System.out.println("[agent] deferJoin: scheduling failed (" + throwable + "), joining inline");
-            join.run();
-        }
+        System.out.println("[agent] deferJoin: overlay cleared by " + setter + ", joining now");
+        joinNow(instance, address, addressPort, extraLocals);
     }
 
     private static void joinNow(Object instance, String address, int addressPort, Object[] extraLocals) {
@@ -86,16 +65,5 @@ public final class AgentBridge {
         } catch (Throwable throwable) {
             System.out.println("[agent] deferJoin: join failed: " + throwable);
         }
-    }
-
-    /** A void method of the game class taking a single Runnable, i.e. its task queue. */
-    private static Method findExecutor(Object instance) {
-        for (Method method : instance.getClass().getMethods()) {
-            Class<?>[] parameters = method.getParameterTypes();
-            if (parameters.length == 1 && parameters[0] == Runnable.class && method.getReturnType() == void.class) {
-                return method;
-            }
-        }
-        return null;
     }
 }
