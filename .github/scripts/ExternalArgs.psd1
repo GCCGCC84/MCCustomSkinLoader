@@ -50,6 +50,23 @@
             JvmArgs = '-javaagent:CustomSkinLoader-Test-1.0.0.jar=deferJoin,preloadForgeNetwork'
         },
         @{
+            # 1.16.4 added "if (allowsMultiplayer() && serverAddress != null)" to Minecraft's
+            # constructor, and allowsMultiplayer() asks authlib's SocialInteractionsService, which is
+            # false for the throw-away session the game tests use. The client then drops the server
+            # address and stays on the title screen: no connect attempt, no log line, no crash, no
+            # screenshot, only the harness timeout. Routing the authlib calls into a dead proxy (the
+            # earlier --proxyHost workaround) does not change that; allowMultiplayer removes exactly
+            # that branch. 1.16.1-1.16.3 pass without it, 1.16.4 is where the branch was introduced.
+            Name    = 'allowMultiplayer'
+            Matrix  = @(
+                @{
+                    Loaders = @('fabric', 'forge', 'quilt')
+                    VersionRange = @('1.16.4', '1.16.5')
+                }
+            )
+            JvmArgs = '-javaagent:CustomSkinLoader-Test-1.0.0.jar=allowMultiplayer'
+        },
+        @{
             # Quilt 0.30.1 loads com.mojang:blocklist and com.mojang:patchy in two different class
             # loaders, so ServiceLoader rejects MojangBlockListSupplier and the connection thread
             # dies. Declaring both jars as loader.systemLibraries keeps them in one loader.
@@ -74,11 +91,8 @@
             )
             JvmArgs = '-Dloader.systemLibraries=${library_directory}/com/mojang/blocklist/1.0.6/blocklist-1.0.6.jar${classpath_separator}${library_directory}/com/mojang/patchy/2.1.6/patchy-2.1.6.jar'
         }
-        # 1.16.4/1.16.5 deliberately have no entry: the client drops the server address because
-        # Minecraft.allowsMultiplayer() asks authlib's SocialInteractionsService.serversAllowed(),
-        # which is false for the throw-away session the tests use, so the client silently stays on the
-        # title screen (no log line, no screenshot, harness timeout). Sending the authlib calls into a
-        # dead proxy (the previous workaround) does not change that. The agent has to make the
-        # deferred join independent of the multiplayer permission instead of faking the network.
+        # Note: the fabric/quilt combos of 1.16.4/1.16.5 receive deferJoin from the first entry and
+        # allowMultiplayer from the entry above; Prepare-TestVersion.ps1 merges both ids into one
+        # -javaagent argument so the agent jar is loaded exactly once.
     )
 }

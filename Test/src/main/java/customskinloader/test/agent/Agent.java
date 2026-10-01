@@ -16,6 +16,7 @@ import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.InsnList;
+import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodNode;
@@ -37,8 +38,13 @@ import org.objectweb.asm.tree.MethodNode;
  * patched class was written back, so a failing job shows whether the workaround was in effect.
  */
 public final class Agent implements Opcodes {
-    /** Minecraft in the mapping namespaces the game tests run under (Mojmap/SRG and intermediary). */
-    private static final String[] GAME_CLASSES = {"net.minecraft.client.Minecraft", "net.minecraft.class_310"};
+    /**
+     * Minecraft in the mapping namespaces the game tests run under: Mojmap/SRG on Forge, NeoForge and
+     * Mojang-named clients ("net.minecraft.client.Minecraft"), intermediary on Fabric and Quilt
+     * ("net.minecraft.class_310"). ClassFileTransformer gets the internal form with '/' separators,
+     * so the names must not be written with dots here.
+     */
+    private static final String[] GAME_CLASSES = {"net.minecraft/client/Minecraft", "net.minecraft/class_310"};
 
     /**
      * Locates Minecraft's constructor: the only method of the class that loads the window icon
@@ -95,21 +101,31 @@ public final class Agent implements Opcodes {
         boolean apply(ClassNode classNode);
     }
 
+    private static final List<String> KNOWN_WORKAROUNDS =
+            Arrays.asList("allowMultiplayer", "deferJoin", "preloadForgeNetwork");
+
     private Agent() {
     }
 
     public static void premain(String agentArgs, Instrumentation instrumentation) {
-        List<String> workarounds = parseArguments(agentArgs);
-        log("requested workarounds: " + workarounds);
-        for (String workaround : workarounds) {
-            if ("deferJoin".equals(workaround)) {
-                installTransformer(instrumentation, workaround, GAME_CLASSES, Agent::deferJoin);
-            } else if ("preloadForgeNetwork".equals(workaround)) {
-                installPreloadTrigger(instrumentation);
-            } else {
+        List<String> requested = parseArguments(agentArgs);
+        log("requested workarounds: " + requested);
+        for (String workaround : requested) {
+            if (!KNOWN_WORKAROUNDS.contains(workaround)) {
                 throw new IllegalArgumentException("unknown workaround '" + workaround
-                        + "', known workarounds: deferJoin, preloadForgeNetwork");
+                        + "', known workarounds: " + KNOWN_WORKAROUNDS);
             }
+        }
+        // Fixed application order instead of argument order: allowMultiplayer edits the permission
+        // branch in front of the address check, which deferJoin then relocates behind it.
+        if (requested.contains("allowMultiplayer")) {
+            installTransformer(instrumentation, "allowMultiplayer", GAME_CLASSES, Agent::allowMultiplayer);
+        }
+        if (requested.contains("deferJoin")) {
+            installTransformer(instrumentation, "deferJoin", GAME_CLASSES, Agent::deferJoin);
+        }
+        if (requested.contains("preloadForgeNetwork")) {
+            installPreloadTrigger(instrumentation);
         }
     }
 
@@ -163,6 +179,43 @@ public final class Agent implements Opcodes {
     }
 
     /**
+     * Drops the multiplayer permission gate in front of the server address. 1.16.4 introduced
+     * {@code if (allowsMultiplayer() && serverAddress != null)} in Minecraft's constructor, and
+     * allowsMultiplayer() asks authlib's SocialInteractionsService, which answers false for the
+     * throw-away session the game tests use. The client then silently drops the address and stays on
+     * the title screen: no connect attempt, no log line, no crash, no screenshot. The patch replaces
+     * that conditional branch with a POP, so only this constructor's decision changes and the rest of
+     * the client (Multiplayer button, chat warning) keeps its behaviour.
+     */
+    private static boolean allowMultiplayer(ClassNode classNode) {
+        MethodNode constructor = findGameConstructor(classNode);
+        if (constructor == null) {
+            log("allowMultiplayer: no constructor loads " + ICON_RESOURCE);
+            return false;
+        }
+        // The gate and the "serverData.address == null" test branch to the same label, i.e.
+        // "if (!allowsMultiplayer() || address == null) skip the address". Only the pair is
+        // unambiguous, so look for an IFNULL with a matching IFEQ right in front of it.
+        InsnList instructions = constructor.instructions;
+        for (AbstractInsnNode current = instructions.getLast(); current != null; current = current.getPrevious()) {
+            if (current.getOpcode() != IFNULL) {
+                continue;
+            }
+            AbstractInsnNode skip = ((JumpInsnNode) current).label;
+            AbstractInsnNode candidate = current.getPrevious();
+            for (int distance = 0; candidate != null && distance < 12; distance++, candidate = candidate.getPrevious()) {
+                if (candidate.getOpcode() == IFEQ && ((JumpInsnNode) candidate).label == skip) {
+                    instructions.set(candidate, new InsnNode(POP));
+                    log("allowMultiplayer: dropped the multiplayer gate in " + constructor.name);
+                    return true;
+                }
+            }
+        }
+        log("allowMultiplayer: no multiplayer gate in front of an address check in " + constructor.name);
+        return false;
+    }
+
+    /**
      * Defers the automatic join of the server address: the client connects while the first resource
      * reload is still running, so it renders the world before the block atlas and the shaders exist
      * (1.15.1 raised ReportedException "Rendering overlay" from ConnectingScreen.&lt;init&gt;, 1.18 hit
@@ -175,13 +228,7 @@ public final class Agent implements Opcodes {
      * instead of before it.
      */
     private static boolean deferJoin(ClassNode classNode) {
-        MethodNode constructor = null;
-        for (MethodNode methodNode : classNode.methods) {
-            if (containsIconResource(methodNode)) {
-                constructor = methodNode;
-                break;
-            }
-        }
+        MethodNode constructor = findGameConstructor(classNode);
         if (constructor == null) {
             log("deferJoin: no constructor loads " + ICON_RESOURCE);
             return false;
@@ -189,10 +236,10 @@ public final class Agent implements Opcodes {
 
         InsnList instructions = constructor.instructions;
         AbstractInsnNode gotoNode = findLast(instructions, GOTO, null);
-        AbstractInsnNode ifNullNode = findLast(instructions, IFNULL, gotoNode);
-        AbstractInsnNode addressNode = findLast(instructions, ALOAD, ifNullNode);
+        JumpInsnNode addressCheck = findAddressCheck(instructions);
+        AbstractInsnNode addressNode = addressCheck == null ? null : addressCheck.getPrevious();
         AbstractInsnNode returnNode = findLast(instructions, RETURN, null);
-        if (addressNode == null || returnNode == null) {
+        if (gotoNode == null || addressNode == null || returnNode == null) {
             log("deferJoin: no address check followed by a GOTO in " + constructor.name);
             return false;
         }
@@ -266,6 +313,29 @@ public final class Agent implements Opcodes {
                 return null;
             }
         });
+    }
+
+    private static MethodNode findGameConstructor(ClassNode classNode) {
+        for (MethodNode methodNode : classNode.methods) {
+            if (containsIconResource(methodNode)) {
+                return methodNode;
+            }
+        }
+        return null;
+    }
+
+    /** Finds the "if (serverAddress != null)" test: the last ALOAD followed by an IFNULL. */
+    private static JumpInsnNode findAddressCheck(InsnList instructions) {
+        for (AbstractInsnNode current = instructions.getLast(); current != null; current = current.getPrevious()) {
+            if (current.getOpcode() != IFNULL) {
+                continue;
+            }
+            AbstractInsnNode previous = current.getPrevious();
+            if (previous != null && previous.getOpcode() == ALOAD) {
+                return (JumpInsnNode) current;
+            }
+        }
+        return null;
     }
 
     private static AbstractInsnNode findLast(InsnList instructions, int opcode, AbstractInsnNode before) {

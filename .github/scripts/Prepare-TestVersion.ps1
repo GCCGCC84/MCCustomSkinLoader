@@ -507,29 +507,50 @@ $defaultUserJvmArguments = @(
     "-XX:MaxGCPauseMillis=50"
     "-XX:G1HeapRegionSize=32M"
 )
+function Resolve-WorkaroundArguments {
+    param($ExternalArgs, [string]$Loader, [version]$GameVersion, [string]$Client)
+    $jvmArguments = @()
+    $gameArguments = @()
+    # Workaround entries are independent, but one agent jar must only be loaded once, so all entries
+    # touching the same agent are merged into a single -javaagent argument here.
+    $agentWorkarounds = [ordered]@{}
+    foreach ($entry in @($ExternalArgs)) {
+        $matched = $false
+        foreach ($rule in @($entry.Matrix)) {
+            if (@($rule.Loaders) -notcontains $Loader) { continue }
+            $range = @($rule.VersionRange)
+            for ($index = 0; $index + 1 -lt $range.Count; $index += 2) {
+                if ($GameVersion -ge [version]([string]$range[$index]) -and $GameVersion -le [version]([string]$range[$index + 1])) { $matched = $true; break }
+            }
+            if ($matched) { break }
+        }
+        if (-not $matched) { continue }
+        $workaroundName = if ($entry.Name) { [string]$entry.Name } else { 'unnamed' }
+        Write-Host "[$(Get-Date -Format s)] [workaround] $workaroundName applies to $Client"
+        foreach ($argument in @([string]$entry.JvmArgs -split "\s+" | Where-Object { $_ })) {
+            if (-not $argument.StartsWith("-javaagent:")) { $jvmArguments += $argument; continue }
+            $specification = $argument.Substring("-javaagent:".Length)
+            $separator = $specification.IndexOf("=")
+            if ($separator -lt 0) { throw "Invalid javaagent argument '$argument': expected '-javaagent:<jar>=<workaround>[,<workaround>]'" }
+            $jar = $specification.Substring(0, $separator)
+            $agentWorkarounds[$jar] = @($agentWorkarounds[$jar] + @($specification.Substring($separator + 1) -split ",") | Where-Object { $_ } | Select-Object -Unique)
+        }
+        if ($entry.AppArgs) { $gameArguments += @([string]$entry.AppArgs -split "\s+" | Where-Object { $_ }) }
+    }
+    foreach ($jar in $agentWorkarounds.Keys) {
+        $jvmArguments += "-javaagent:${jar}=$($agentWorkarounds[$jar] -join ',')"
+    }
+    return [pscustomobject]@{ JvmArguments = $jvmArguments; GameArguments = $gameArguments }
+}
+
 foreach ($versionObject in $allVersions) {
     $versionId = [string]$versionObject.id
     $extraJvmArguments = @()
     $extraGameArguments = @()
     if ($clientLoaders.ContainsKey($versionId)) {
-        $loader = [string]$clientLoaders[$versionId]
-        $gameVersion = [version]$MinecraftVersion
-        foreach ($entry in @($ExternalArgs.Args)) {
-            $matched = $false
-            foreach ($rule in @($entry.Matrix)) {
-                if (@($rule.Loaders) -notcontains $loader) { continue }
-                $range = @($rule.VersionRange)
-                for ($index = 0; $index + 1 -lt $range.Count; $index += 2) {
-                    if ($gameVersion -ge [version]([string]$range[$index]) -and $gameVersion -le [version]([string]$range[$index + 1])) { $matched = $true; break }
-                }
-                if ($matched) { break }
-            }
-            if (-not $matched) { continue }
-            $workaroundName = if ($entry.Name) { [string]$entry.Name } else { 'unnamed' }
-            Write-Host "[$(Get-Date -Format s)] [workaround] $workaroundName applies to $versionId"
-            if ($entry.JvmArgs) { $extraJvmArguments += @([string]$entry.JvmArgs -split "\s+" | Where-Object { $_ }) }
-            if ($entry.AppArgs) { $extraGameArguments += @([string]$entry.AppArgs -split "\s+" | Where-Object { $_ }) }
-        }
+        $extra = Resolve-WorkaroundArguments -ExternalArgs $ExternalArgs.Args -Loader ([string]$clientLoaders[$versionId]) -GameVersion ([version]$MinecraftVersion) -Client $versionId
+        $extraJvmArguments = @($extra.JvmArguments)
+        $extraGameArguments = @($extra.GameArguments)
     }
     if ($versionObject.arguments) {
         $jvmArguments = @(Expand-ArgumentList $versionObject.arguments.jvm)
