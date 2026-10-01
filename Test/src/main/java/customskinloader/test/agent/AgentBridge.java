@@ -13,18 +13,20 @@ public final class AgentBridge {
     private static volatile Object minecraft;
     private static volatile String host;
     private static volatile int port;
+    private static volatile Object[] extras;
 
     private AgentBridge() {
     }
 
     /** Called from Minecraft's constructor; the join itself waits for {@link #onOverlayChanged}. */
-    public static void deferJoin(Object minecraftInstance, String address, int addressPort) {
+    public static void deferJoin(Object minecraftInstance, String address, int addressPort, Object[] extraLocals) {
         if (minecraftInstance == null || address == null) {
             return;
         }
         minecraft = minecraftInstance;
         host = address;
         port = addressPort;
+        extras = extraLocals == null ? new Object[0] : extraLocals;
         System.out.println("[agent] deferJoin: joining " + address + ":" + addressPort + " after the first resource reload");
     }
 
@@ -46,12 +48,14 @@ public final class AgentBridge {
         Object instance = minecraft;
         String address = host;
         int addressPort = port;
+        Object[] extraLocals = extras;
         minecraft = null;
         host = null;
         port = 0;
+        extras = null;
         try {
-            Method join = instance.getClass().getMethod("__cslDeferredJoin", String.class, int.class);
-            join.invoke(instance, address, addressPort);
+            Method join = instance.getClass().getMethod("__cslDeferredJoin", String.class, int.class, Object[].class);
+            join.invoke(instance, address, addressPort, extraLocals);
             System.out.println("[agent] deferJoin: joined " + address + ":" + addressPort);
         } catch (Throwable throwable) {
             System.out.println("[agent] deferJoin: join failed: " + throwable);

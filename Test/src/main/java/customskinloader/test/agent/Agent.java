@@ -4,6 +4,7 @@ import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
 import java.security.ProtectionDomain;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -23,6 +24,11 @@ import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LineNumberNode;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import org.objectweb.asm.tree.IntInsnNode;
+import org.objectweb.asm.tree.TypeInsnNode;
+import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TryCatchBlockNode;
 
@@ -61,10 +67,12 @@ public final class Agent implements Opcodes {
     private static final String BRIDGE_CLASS = "customskinloader/test/agent/AgentBridge";
 
     /**
-     * Upper bound for the connect branch. The vanilla constructors of 1.15-1.19 keep it at 6 to 11
-     * instructions; anything larger means the structural search anchored on the wrong block.
+     * Upper bound for the connect branch. The vanilla constructors keep it between 6 and 69
+     * instructions (1.14 builds the parent screen, the address and its own temporaries inside the
+     * branch); anything larger means the structural search anchored on the wrong part of the
+     * constructor.
      */
-    private static final int MAX_CONNECT_BRANCH_INSTRUCTIONS = 32;
+    private static final int MAX_CONNECT_BRANCH_INSTRUCTIONS = 96;
 
     /**
      * Forge ModLauncher network classes (1.13.2-1.14.3). The login handshake resolves them lazily
@@ -288,7 +296,9 @@ public final class Agent implements Opcodes {
             log("deferJoin: the connect branch does not end with a branch in " + constructor.name);
             return false;
         }
-        String rejection = rejectConnectBranch(constructor, connectStart, connectEnd, addressNode.var);
+        List<Integer> extraLocals = new ArrayList<Integer>();
+        List<Integer> allForeignLocals = new ArrayList<Integer>();
+        String rejection = rejectConnectBranch(constructor, connectStart, connectEnd, addressNode.var, extraLocals, allForeignLocals);
         if (rejection != null) {
             log("deferJoin: " + rejection + " in " + constructor.name + ", left unchanged");
             return false;
@@ -300,17 +310,74 @@ public final class Agent implements Opcodes {
         }
 
         int hostLocal = addressNode.var;
-        int portLocal = ((VarInsnNode) findNext(instructions, ILOAD, connectStart, connectEnd)).var;
+        // 1.14 passes host and port inside an object local, so there may be no port local at all.
+        AbstractInsnNode portNode = findNext(instructions, ILOAD, connectStart, connectEnd);
+        int portLocal = portNode == null ? 0 : ((VarInsnNode) portNode).var;
+        List<String> extraTypes = new ArrayList<String>();
+        for (int local : extraLocals) {
+            String type = findLocalType(connectStart, connectEnd, local);
+            if (type == null) {
+                log("deferJoin: cannot tell the type of local " + local + " in " + constructor.name + ", left unchanged");
+                return false;
+            }
+            extraTypes.add(type);
+        }
 
         // The connect branch becomes a method of its own: "this" stays local 0, the address and the
         // port move to the two parameter slots.
-        MethodNode join = new MethodNode(ACC_PUBLIC, JOIN_METHOD, "(Ljava/lang/String;I)V", null, null);
+        MethodNode join = new MethodNode(ACC_PUBLIC, JOIN_METHOD, "(Ljava/lang/String;I[Ljava/lang/Object;)V", null, null);
+        Map<Integer, Integer> movedSlots = new LinkedHashMap<Integer, Integer>();
+        List<Object> joinLocals = new ArrayList<Object>();
+        joinLocals.add(classNode.name);
+        joinLocals.add("java/lang/String");
+        joinLocals.add(INTEGER);
+        joinLocals.add("[Ljava/lang/Object;");
+        int nextSlot = 4;
+        for (int index = 0; index < extraLocals.size(); index++) {
+            movedSlots.put(extraLocals.get(index), nextSlot);
+            join.instructions.add(new VarInsnNode(ALOAD, 3));
+            join.instructions.add(intConstant(index));
+            join.instructions.add(new InsnNode(AALOAD));
+            join.instructions.add(new TypeInsnNode(CHECKCAST, extraTypes.get(index)));
+            join.instructions.add(new VarInsnNode(ASTORE, nextSlot));
+            joinLocals.add("java/lang/Object");
+            nextSlot++;
+        }
+        for (int local : allForeignLocals) {
+            if (movedSlots.containsKey(local)) {
+                continue;
+            }
+            movedSlots.put(local, nextSlot);
+            joinLocals.add(localType(connectStart, connectEnd, local));
+            nextSlot++;
+        }
         for (AbstractInsnNode current = connectStart; current != null && current != connectEnd; ) {
             AbstractInsnNode next = current.getNext();
             instructions.remove(current);
+            if (current instanceof LineNumberNode) {
+                // Only meaningful for the constructor's own stack traces.
+                current = next;
+                continue;
+            }
             if (current instanceof VarInsnNode) {
                 VarInsnNode variable = (VarInsnNode) current;
-                variable.var = variable.var == hostLocal ? 1 : variable.var == portLocal ? 2 : 0;
+                if (variable.var == hostLocal) {
+                    variable.var = 1;
+                } else if (variable.var == portLocal) {
+                    variable.var = 2;
+                } else if (movedSlots.containsKey(variable.var)) {
+                    variable.var = movedSlots.get(variable.var);
+                } else {
+                    variable.var = 0;
+                }
+            }
+            if (current instanceof FrameNode) {
+                // The moved code runs on "this, host, port" only; a stack map frame at one of its
+                // internal jump targets has to say exactly that.
+                FrameNode frame = (FrameNode) current;
+                frame.type = F_NEW;
+                frame.local = joinLocals;
+                frame.stack = Collections.emptyList();
             }
             join.instructions.add(current);
             current = next;
@@ -323,8 +390,16 @@ public final class Agent implements Opcodes {
         InsnList handover = new InsnList();
         handover.add(new VarInsnNode(ALOAD, 0));
         handover.add(new VarInsnNode(ALOAD, hostLocal));
-        handover.add(new VarInsnNode(ILOAD, portLocal));
-        handover.add(new MethodInsnNode(INVOKESTATIC, BRIDGE_CLASS, "deferJoin", "(Ljava/lang/Object;Ljava/lang/String;I)V", false));
+        handover.add(portNode == null ? intConstant(0) : new VarInsnNode(ILOAD, portLocal));
+        handover.add(intConstant(extraLocals.size()));
+        handover.add(new TypeInsnNode(ANEWARRAY, "java/lang/Object"));
+        for (int index = 0; index < extraLocals.size(); index++) {
+            handover.add(new InsnNode(DUP));
+            handover.add(intConstant(index));
+            handover.add(new VarInsnNode(ALOAD, extraLocals.get(index)));
+            handover.add(new InsnNode(AASTORE));
+        }
+        handover.add(new MethodInsnNode(INVOKESTATIC, BRIDGE_CLASS, "deferJoin", "(Ljava/lang/Object;Ljava/lang/String;I[Ljava/lang/Object;)V", false));
         instructions.insertBefore(addressNode, handover);
         instructions.insertBefore(addressCheck, new InsnNode(POP));
         instructions.set(addressCheck, new JumpInsnNode(GOTO, addressCheck.label));
@@ -357,36 +432,67 @@ public final class Agent implements Opcodes {
      * handler invalidates the handler table (1.14's constructor is such a case; its heuristic block
      * had 778 instructions and the client died with "VerifyError: Bad local variable type").
      */
-    private static String rejectConnectBranch(MethodNode constructor, AbstractInsnNode start, AbstractInsnNode stop, int hostLocal) {
+    private static String rejectConnectBranch(MethodNode constructor, AbstractInsnNode start, AbstractInsnNode stop, int hostLocal,
+            List<Integer> readableLocals, List<Integer> knownLocals) {
         int size = 0;
         int ports = 0;
-        boolean buildsScreen = false;
+        boolean acts = false;
+        boolean usesContext = false;
         for (AbstractInsnNode current = start; current != null && current != stop; current = current.getNext()) {
             size++;
-            if (current instanceof LabelNode || current instanceof FrameNode || current instanceof JumpInsnNode) {
-                return "the connect branch carries labels, frames or jumps";
-            }
             int opcode = current.getOpcode();
-            if (opcode == NEW) {
-                buildsScreen = true;
+            if (opcode == NEW || opcode == INVOKEVIRTUAL || opcode == INVOKESTATIC || opcode == INVOKESPECIAL) {
+                acts = true;
+            }
+            if (opcode == ALOAD && ((VarInsnNode) current).var == hostLocal) {
+                usesContext = true;
+            }
+            if (current instanceof JumpInsnNode && !between(((JumpInsnNode) current).label, start, stop)) {
+                return "the connect branch jumps out of itself";
+            }
+            if (current instanceof FrameNode && !((FrameNode) current).stack.isEmpty()) {
+                return "a frame inside the connect branch has a non-empty stack";
             }
             if (current instanceof VarInsnNode) {
                 VarInsnNode variable = (VarInsnNode) current;
                 if (opcode == ILOAD) {
                     ports++;
                 } else if (variable.var != 0 && variable.var != hostLocal) {
-                    return "the connect branch reads a local it does not own";
+                    boolean store = opcode == ASTORE || opcode == ISTORE || opcode == LSTORE
+                            || opcode == FSTORE || opcode == DSTORE;
+                    if (!store && !readableLocals.contains(variable.var)) {
+                        // Only object locals can travel through the bridge; the branches that need this
+                        // read the game configuration or an address object computed earlier.
+                        if (opcode != ALOAD) {
+                            return "the connect branch reads local " + variable.var + " (opcode " + opcode + ")";
+                        }
+                        readableLocals.add(variable.var);
+                    }
+                    knownLocals.add(variable.var);
                 }
             }
         }
-        if (!buildsScreen) {
-            return "the connect branch does not build a screen";
+        if (!acts) {
+            return "the connect branch does nothing";
+        }
+        if (!usesContext) {
+            // The branch has to consume the address the guard tested, otherwise it is not the connect
+            // code but some other null check.
+            for (AbstractInsnNode current = start; current != null && current != stop; current = current.getNext()) {
+                if (current.getOpcode() == ALOAD && ((VarInsnNode) current).var != 0 && ((VarInsnNode) current).var != hostLocal) {
+                    usesContext = true;
+                    break;
+                }
+            }
+        }
+        if (!usesContext) {
+            return "the connect branch does not use the address";
         }
         if (size > MAX_CONNECT_BRANCH_INSTRUCTIONS) {
             return "the connect branch has " + size + " instructions (limit " + MAX_CONNECT_BRANCH_INSTRUCTIONS + ")";
         }
-        if (ports != 1) {
-            return "the connect branch loads " + ports + " integer local(s) instead of the port";
+        if (ports > 1) {
+            return "the connect branch loads " + ports + " integer locals instead of at most one port";
         }
         for (AbstractInsnNode current = constructor.instructions.getFirst(); current != null; current = current.getNext()) {
             if (current instanceof JumpInsnNode && !between(current, start, stop) && between(((JumpInsnNode) current).label, start, stop)) {
@@ -429,6 +535,61 @@ public final class Agent implements Opcodes {
             }
         }
         return setters;
+    }
+
+    /** ICONST_0..ICONST_5 where possible, otherwise BIPUSH. */
+    private static AbstractInsnNode intConstant(int value) {
+        return value <= 5 ? new InsnNode(ICONST_0 + value) : new IntInsnNode(BIPUSH, value);
+    }
+
+    /**
+     * The class an object local has to be cast back to after it travelled through the bridge as an
+     * Object: the owner of the first field or method the branch uses it with.
+     */
+    private static String findLocalType(AbstractInsnNode start, AbstractInsnNode stop, int local) {
+        for (AbstractInsnNode current = start; current != null && current != stop; current = current.getNext()) {
+            if (current.getOpcode() != ALOAD || ((VarInsnNode) current).var != local) {
+                continue;
+            }
+            for (AbstractInsnNode use = current.getNext(); use != null && use != stop; use = use.getNext()) {
+                if (use.getOpcode() == ALOAD) {
+                    break;
+                }
+                if (use instanceof FieldInsnNode) {
+                    return ((FieldInsnNode) use).owner;
+                }
+                if (use instanceof MethodInsnNode && use.getOpcode() != INVOKESTATIC) {
+                    return ((MethodInsnNode) use).owner;
+                }
+                if (use instanceof TypeInsnNode && use.getOpcode() == CHECKCAST) {
+                    return ((TypeInsnNode) use).desc;
+                }
+            }
+        }
+        return null;
+    }
+
+    /** The frame type of a branch-local temporary: object, int, long, float, double or boolean. */
+    private static Object localType(AbstractInsnNode start, AbstractInsnNode stop, int local) {
+        for (AbstractInsnNode current = start; current != null && current != stop; current = current.getNext()) {
+            if (current instanceof VarInsnNode && ((VarInsnNode) current).var == local) {
+                switch (current.getOpcode()) {
+                    case ASTORE:
+                        return "java/lang/Object";
+                    case ISTORE:
+                        return INTEGER;
+                    case LSTORE:
+                        return LONG;
+                    case FSTORE:
+                        return FLOAT;
+                    case DSTORE:
+                        return DOUBLE;
+                    default:
+                        break;
+                }
+            }
+        }
+        return "java/lang/Object";
     }
 
     private static MethodNode findMethod(ClassNode classNode, String name, String desc) {

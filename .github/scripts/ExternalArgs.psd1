@@ -41,8 +41,10 @@
                     # ReportedException "Rendering overlay" while ConnectingScreen is created, Quilt
                     # 1.18/1.18.2 crash with an NPE in ShaderInstance.getUniform() and Quilt 1.19.1
                     # connects but never finishes the first resource reload.
+                    # Forge 1.16.4/1.16.5 are flaky without it (run 7 passed, run 8 failed) and get
+                    # allowMultiplayer from the entry below at the same time.
                     Loaders = @('forge')
-                    VersionRange = @('1.15', '1.15.1')
+                    VersionRange = @('1.15', '1.15.1', '1.16.4', '1.16.5')
                 },
                 @{
                     # 1.17.1 and 1.18.1 hit the same race but only intermittently (they passed in run 3
