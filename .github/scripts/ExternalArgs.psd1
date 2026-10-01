@@ -23,9 +23,12 @@
             # still running, so it renders the world before the block atlas and the shaders exist.
             # Observed on 1.15.1 as ReportedException "Rendering overlay" raised from
             # ConnectingScreen.<init>, on 1.18 as NPE in ShaderInstance.getUniform() plus
-            # FileNotFoundException textures/atlas/blocks.png. deferJoin moves the auto-connect part of
-            # Minecraft's constructor behind the rest of the constructor so the join happens once the
-            # loading overlay is installed.
+            # FileNotFoundException textures/atlas/blocks.png, on 1.14.1 as NPE "Tesselating block in
+            # world". deferJoin makes the client start on the title screen, keeps the address and joins
+            # when the loading overlay is cleared, i.e. after the first resource reload.
+            # It applies to the vanilla constructor shapes of 1.15-1.18 and steps aside (logging why) on
+            # 1.14.x, whose connect branch sits inside exception handlers, and on 1.19.1, whose branch
+            # reads extra locals; both need their own anchoring.
             Name    = 'deferJoin'
             Matrix  = @(
                 @{

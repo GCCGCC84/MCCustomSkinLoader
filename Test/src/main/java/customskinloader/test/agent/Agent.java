@@ -17,6 +17,12 @@ import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
+import org.objectweb.asm.Type;
+import org.objectweb.asm.tree.FrameNode;
+import org.objectweb.asm.tree.MethodInsnNode;
+import org.objectweb.asm.tree.VarInsnNode;
+import org.objectweb.asm.tree.LabelNode;
+import org.objectweb.asm.tree.LineNumberNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TryCatchBlockNode;
 
@@ -48,12 +54,17 @@ public final class Agent implements Opcodes {
      */
     private static final String GAME_MARKER = "icons/icon_16x16.png";
 
+    /** Method the agent adds to the game class for the join; AgentBridge calls it reflectively. */
+    private static final String JOIN_METHOD = "__cslDeferredJoin";
+
+    /** Bridge class of the agent jar; only java.lang types cross this boundary. */
+    private static final String BRIDGE_CLASS = "customskinloader/test/agent/AgentBridge";
+
     /**
-     * Upper bound for the block deferJoin relocates. The vanilla constructors of 1.14-1.19 move
-     * between 26 and 44 instructions; anything larger means the heuristic anchored on the wrong
-     * block.
+     * Upper bound for the connect branch. The vanilla constructors of 1.15-1.19 keep it at 6 to 11
+     * instructions; anything larger means the structural search anchored on the wrong block.
      */
-    private static final int MAX_MOVED_INSTRUCTIONS = 64;
+    private static final int MAX_CONNECT_BRANCH_INSTRUCTIONS = 32;
 
     /**
      * Forge ModLauncher network classes (1.13.2-1.14.3). The login handshake resolves them lazily
@@ -235,16 +246,23 @@ public final class Agent implements Opcodes {
     }
 
     /**
-     * Defers the automatic join of the server address: the client connects while the first resource
-     * reload is still running, so it renders the world before the block atlas and the shaders exist
-     * (1.15.1 raised ReportedException "Rendering overlay" from ConnectingScreen.&lt;init&gt;, 1.18 hit
-     * an NPE in ShaderInstance.getUniform() and a missing textures/atlas/blocks.png).
+     * Defers the automatic join of the server address until the first resource reload has finished.
      *
-     * <p>The join lives at the end of Minecraft's constructor as
-     * {@code setScreen(serverAddress != null ? new ConnectScreen(new TitleScreen(), this, host, port)
-     * : new TitleScreen(true))}. The patch moves the address-dependent block behind the rest of the
-     * constructor, so the connecting screen is created after the loading overlay has been installed
-     * instead of before it.
+     * <p>The constructor of 1.14-1.19 contains {@code setScreen(serverAddress != null ?
+     * new ConnectScreen(new TitleScreen(), this, host, port) : new TitleScreen(true))}, and the
+     * connecting screen connects from its own constructor, so the client joins and renders the world
+     * while the block atlas and the shaders are still being built (1.15.1 raised ReportedException
+     * "Rendering overlay", 1.18 NPEs while tesselating a block, 1.14.1 the same with "Tesselating
+     * block in world"). The patch:
+     * <ul>
+     *   <li>hands the address to {@link AgentBridge} and always takes the title screen branch,</li>
+     *   <li>moves the connect branch verbatim into a new method of the game class, which
+     *       {@link AgentBridge#onOverlayChanged} invokes reflectively,</li>
+     *   <li>calls the bridge from the overlay setter, which runs exactly when the loading overlay is
+     *       cleared, i.e. when the first resource reload is done.</li>
+     * </ul>
+     * Everything is found by shape and moved verbatim, so no mapping name is needed. The class is left
+     * alone whenever a shape does not match, and the log states why.
      */
     private static boolean deferJoin(ClassNode classNode) {
         MethodNode constructor = findGameConstructor(classNode);
@@ -252,80 +270,167 @@ public final class Agent implements Opcodes {
             log("deferJoin: no constructor loads " + GAME_MARKER);
             return false;
         }
-
         InsnList instructions = constructor.instructions;
-        AbstractInsnNode gotoNode = findLast(instructions, GOTO, null);
         JumpInsnNode addressCheck = findAddressCheck(instructions);
-        AbstractInsnNode addressNode = addressCheck == null ? null : addressCheck.getPrevious();
-        AbstractInsnNode returnNode = findLast(instructions, RETURN, null);
-        if (gotoNode == null || addressNode == null || returnNode == null) {
-            log("deferJoin: no address check followed by a GOTO in " + constructor.name);
+        VarInsnNode addressNode = addressCheck == null ? null : (VarInsnNode) addressCheck.getPrevious();
+        if (addressNode == null || addressCheck.getNext() == null) {
+            log("deferJoin: no server address check in " + constructor.name);
             return false;
         }
-
-        AbstractInsnNode stop = ((JumpInsnNode) gotoNode).label.getNext();
-        String rejection = rejectMovedRange(constructor, addressNode, stop);
+        // The branch starts behind the label, line number and frame entries of this position; they stay
+        // in the constructor, where nothing depends on them any more once the body has moved.
+        AbstractInsnNode connectStart = addressCheck.getNext();
+        while (connectStart != null && (connectStart instanceof LabelNode || connectStart instanceof LineNumberNode || connectStart instanceof FrameNode)) {
+            connectStart = connectStart.getNext();
+        }
+        AbstractInsnNode connectEnd = connectStart == null ? null : findNext(instructions, GOTO, connectStart, null);
+        if (connectEnd == null) {
+            log("deferJoin: the connect branch does not end with a branch in " + constructor.name);
+            return false;
+        }
+        String rejection = rejectConnectBranch(constructor, connectStart, connectEnd, addressNode.var);
         if (rejection != null) {
             log("deferJoin: " + rejection + " in " + constructor.name + ", left unchanged");
             return false;
         }
+        MethodInsnNode overlayCall = findLastOverlayCall(constructor, classNode.name);
+        MethodNode overlaySetter = overlayCall == null ? null : findMethod(classNode, overlayCall.name, overlayCall.desc);
+        if (overlaySetter == null || (overlaySetter.access & ACC_STATIC) != 0
+                || Type.getArgumentTypes(overlaySetter.desc).length != 1) {
+            log("deferJoin: no overlay setter in " + classNode.name + ", left unchanged");
+            return false;
+        }
 
-        InsnList moved = new InsnList();
-        for (AbstractInsnNode current = addressNode; current != null && current != stop; ) {
+        int hostLocal = addressNode.var;
+        int portLocal = ((VarInsnNode) findNext(instructions, ILOAD, connectStart, connectEnd)).var;
+
+        // The connect branch becomes a method of its own: "this" stays local 0, the address and the
+        // port move to the two parameter slots.
+        MethodNode join = new MethodNode(ACC_PUBLIC, JOIN_METHOD, "(Ljava/lang/String;I)V", null, null);
+        for (AbstractInsnNode current = connectStart; current != null && current != connectEnd; ) {
             AbstractInsnNode next = current.getNext();
             instructions.remove(current);
-            moved.add(current);
+            if (current instanceof VarInsnNode) {
+                VarInsnNode variable = (VarInsnNode) current;
+                variable.var = variable.var == hostLocal ? 1 : variable.var == portLocal ? 2 : 0;
+            }
+            join.instructions.add(current);
             current = next;
         }
-        int movedCount = moved.size();
-        // insertBefore(InsnList) hands the instructions over to the target list, so count first.
-        instructions.insertBefore(returnNode, moved);
-        log("deferJoin: moved " + movedCount + " instruction(s) behind the rest of " + constructor.name);
+        join.instructions.add(new InsnNode(RETURN));
+        classNode.methods.add(join);
+
+        // Hand the address to the bridge and skip the connect branch: the client starts on the title
+        // screen and the bridge joins as soon as the loading overlay is gone.
+        InsnList handover = new InsnList();
+        handover.add(new VarInsnNode(ALOAD, 0));
+        handover.add(new VarInsnNode(ALOAD, hostLocal));
+        handover.add(new VarInsnNode(ILOAD, portLocal));
+        handover.add(new MethodInsnNode(INVOKESTATIC, BRIDGE_CLASS, "deferJoin", "(Ljava/lang/Object;Ljava/lang/String;I)V", false));
+        instructions.insertBefore(addressNode, handover);
+        instructions.insertBefore(addressCheck, new InsnNode(POP));
+        instructions.set(addressCheck, new JumpInsnNode(GOTO, addressCheck.label));
+        instructions.remove(connectEnd);
+
+        InsnList hook = new InsnList();
+        hook.add(new VarInsnNode(ALOAD, 0));
+        hook.add(new VarInsnNode(ALOAD, 1));
+        hook.add(new MethodInsnNode(INVOKESTATIC, BRIDGE_CLASS, "onOverlayChanged", "(Ljava/lang/Object;Ljava/lang/Object;)V", false));
+        overlaySetter.instructions.insert(hook);
+
+        log("deferJoin: connect branch moved to " + JOIN_METHOD + ", join runs when the overlay is cleared"
+                + " (host local " + hostLocal + ", port local " + portLocal
+                + ", overlay setter " + overlayCall.name + overlayCall.desc + ")");
         return true;
     }
 
     /**
-     * Tells whether moving [start, stop) would produce a class the verifier accepts, and returns the
-     * reason when it would not. The vanilla constructor of 1.15/1.16 moves 26 instructions, but on
-     * 1.14 the same pattern matched 778 instructions and the client died with "VerifyError: Bad local
-     * variable type": a block that carries a screen construction, stays within these bounds and stays
-     * out of every exception handler and branch target is safe, anything else is left alone.
+     * Tells whether the connect branch can be moved into a method of its own, and returns the reason
+     * when it cannot. The branch has to be a straight sequence that only reads the constructor's
+     * "this", address and port, builds a screen and sets it: labels, frames, jumps or other locals
+     * cannot be relocated without recomputing frames, and a branch that cuts through an exception
+     * handler invalidates the handler table (1.14's constructor is such a case; its heuristic block
+     * had 778 instructions and the client died with "VerifyError: Bad local variable type").
      */
-    private static String rejectMovedRange(MethodNode constructor, AbstractInsnNode start, AbstractInsnNode stop) {
+    private static String rejectConnectBranch(MethodNode constructor, AbstractInsnNode start, AbstractInsnNode stop, int hostLocal) {
         int size = 0;
+        int ports = 0;
         boolean buildsScreen = false;
         for (AbstractInsnNode current = start; current != null && current != stop; current = current.getNext()) {
             size++;
-            if (current.getOpcode() == NEW) {
+            if (current instanceof LabelNode || current instanceof FrameNode || current instanceof JumpInsnNode) {
+                return "the connect branch carries labels, frames or jumps";
+            }
+            int opcode = current.getOpcode();
+            if (opcode == NEW) {
                 buildsScreen = true;
             }
-            if (current instanceof JumpInsnNode && !within(((JumpInsnNode) current).label, start, stop)) {
-                return "the block branches out of itself";
+            if (current instanceof VarInsnNode) {
+                VarInsnNode variable = (VarInsnNode) current;
+                if (opcode == ILOAD) {
+                    ports++;
+                } else if (variable.var != 0 && variable.var != hostLocal) {
+                    return "the connect branch reads a local it does not own";
+                }
             }
         }
         if (!buildsScreen) {
-            return "no screen construction after the address check";
+            return "the connect branch does not build a screen";
         }
-        if (size > MAX_MOVED_INSTRUCTIONS) {
-            return "the block has " + size + " instructions (limit " + MAX_MOVED_INSTRUCTIONS + ")";
+        if (size > MAX_CONNECT_BRANCH_INSTRUCTIONS) {
+            return "the connect branch has " + size + " instructions (limit " + MAX_CONNECT_BRANCH_INSTRUCTIONS + ")";
+        }
+        if (ports != 1) {
+            return "the connect branch loads " + ports + " integer local(s) instead of the port";
         }
         for (AbstractInsnNode current = constructor.instructions.getFirst(); current != null; current = current.getNext()) {
-            if (current instanceof JumpInsnNode && !within(current, start, stop) && within(((JumpInsnNode) current).label, start, stop)) {
-                return "code outside the block branches into it";
+            if (current instanceof JumpInsnNode && !between(current, start, stop) && between(((JumpInsnNode) current).label, start, stop)) {
+                return "code outside the connect branch branches into it";
             }
         }
         for (Object block : constructor.tryCatchBlocks) {
-            TryCatchBlockNode tryCatch = (TryCatchBlockNode) block;
-            if (overlaps(tryCatch.start, start, stop) || overlaps(tryCatch.end, start, stop) || overlaps(tryCatch.handler, start, stop)) {
-                if (!(within(tryCatch.start, start, stop) && within(tryCatch.end, start, stop) && within(tryCatch.handler, start, stop))) {
-                    return "the block cuts through an exception handler";
-                }
+            TryCatchBlockNode handler = (TryCatchBlockNode) block;
+            if (touches(handler.start, start, stop) || touches(handler.end, start, stop) || touches(handler.handler, start, stop)) {
+                return "the connect branch cuts through an exception handler";
             }
         }
         return null;
     }
 
-    private static boolean within(AbstractInsnNode node, AbstractInsnNode start, AbstractInsnNode stop) {
+    /** The overlay setter is the last call the constructor makes on the game class with one argument. */
+    private static MethodInsnNode findLastOverlayCall(MethodNode constructor, String gameClass) {
+        for (AbstractInsnNode current = constructor.instructions.getLast(); current != null; current = current.getPrevious()) {
+            if (!(current instanceof MethodInsnNode)) {
+                continue;
+            }
+            MethodInsnNode call = (MethodInsnNode) current;
+            if (call.getOpcode() == INVOKEVIRTUAL && gameClass.equals(call.owner)
+                    && call.desc.startsWith("(L") && call.desc.endsWith(";)V")) {
+                return call;
+            }
+        }
+        return null;
+    }
+
+    private static MethodNode findMethod(ClassNode classNode, String name, String desc) {
+        for (MethodNode methodNode : classNode.methods) {
+            if (name.equals(methodNode.name) && desc.equals(methodNode.desc)) {
+                return methodNode;
+            }
+        }
+        return null;
+    }
+
+    private static AbstractInsnNode findNext(InsnList instructions, int opcode, AbstractInsnNode from, AbstractInsnNode stop) {
+        for (AbstractInsnNode current = from; current != null && current != stop; current = current.getNext()) {
+            if (current.getOpcode() == opcode) {
+                return current;
+            }
+        }
+        return null;
+    }
+
+    private static boolean between(AbstractInsnNode node, AbstractInsnNode start, AbstractInsnNode stop) {
         for (AbstractInsnNode current = start; current != null && current != stop; current = current.getNext()) {
             if (current == node) {
                 return true;
@@ -334,9 +439,9 @@ public final class Agent implements Opcodes {
         return false;
     }
 
-    /** True when the node is one of the range bounds or sits between them. */
-    private static boolean overlaps(AbstractInsnNode node, AbstractInsnNode start, AbstractInsnNode stop) {
-        return within(node, start, stop) || node == stop;
+    /** True when the node is a range bound or sits between them. */
+    private static boolean touches(AbstractInsnNode node, AbstractInsnNode start, AbstractInsnNode stop) {
+        return between(node, start, stop) || node == stop;
     }
 
     /**
