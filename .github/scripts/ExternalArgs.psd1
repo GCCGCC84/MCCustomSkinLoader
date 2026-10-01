@@ -45,6 +45,12 @@
                     VersionRange = @('1.15', '1.15.1')
                 },
                 @{
+                    # 1.17.1 and 1.18.1 hit the same race but only intermittently (they passed in run 3
+                    # and failed in run 7 without a workaround), so they are covered here as well.
+                    Loaders = @('quilt')
+                    VersionRange = @('1.17.1', '1.17.1', '1.18.1', '1.18.1')
+                },
+                @{
                     Loaders = @('quilt')
                     VersionRange = @('1.18', '1.18', '1.18.2', '1.18.2', '1.19.1', '1.19.1')
                 }
