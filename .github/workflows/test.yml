@@ -7,6 +7,11 @@ on:
         description: Name of the artifact uploaded by the build action
         required: true
         type: string
+      game-versions:
+        description: Comma-separated Minecraft versions to test (empty = every version of build.info.json)
+        required: false
+        type: string
+        default: '' 
 
 jobs:
   prepare:
@@ -39,7 +44,11 @@ jobs:
       - name: Prepare test matrix
         id: prepare
         shell: pwsh
-        run: ./.github/scripts/Prepare-TestMatrix.ps1
+        env:
+          GAME_VERSIONS: ${{ inputs.game-versions }}
+        run: |
+          $filter = @($env:GAME_VERSIONS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+          ./.github/scripts/Prepare-TestMatrix.ps1 -GameVersions ($filter -join ',')
 
   test:
     name: Test ${{ matrix.version }}

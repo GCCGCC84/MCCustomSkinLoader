@@ -6,6 +6,12 @@ name: Game Test (verification branch)
 on:
   push:
     branches: ['ci/game-test-workarounds']
+  workflow_dispatch:
+    inputs:
+      game_versions:
+        description: 'Comma-separated Minecraft versions (empty = full matrix)'
+        required: false
+        default: '' 
 
 permissions:
   contents: read
@@ -27,3 +33,6 @@ jobs:
     uses: ./.github/workflows/test.yml
     with:
       artifact-name: CustomSkinLoader-Verify-${{ github.run_number }}
+      # Targeted iteration: the affected versions only, so a push gives feedback in a few minutes.
+      # Set to '' (or dispatch the workflow with the input) for the final full-matrix run.
+      game-versions: ${{ github.event.inputs.game_versions || '1.13.2,1.14,1.14.1,1.14.4,1.15,1.15.1,1.15.2,1.16.5,1.17,1.17.1,1.18.1,1.19.1' }}
