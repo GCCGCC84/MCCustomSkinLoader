@@ -48,7 +48,7 @@ jobs:
           GAME_VERSIONS: ${{ inputs.game-versions }}
         run: |
           $filter = @($env:GAME_VERSIONS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-          ./.github/scripts/Prepare-TestMatrix.ps1 -GameVersions ($filter -join ',')
+          ./.github/scripts/Prepare-TestMatrix.ps1 -VersionFilter ($filter -join ',')
 
   test:
     name: Test ${{ matrix.version }}

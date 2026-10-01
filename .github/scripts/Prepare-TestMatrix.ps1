@@ -1,7 +1,9 @@
 param(
     # Optional comma-separated subset of the versions in build.info.json, for quick iteration on a
-    # problematic version instead of the whole matrix.
-    [string]$GameVersions = ""
+    # problematic version instead of the whole matrix. The name must not collide with $gameVersions
+    # below: PowerShell variable names are case insensitive, and a [string] parameter would coerce the
+    # array of versions into one space separated string.
+    [string]$VersionFilter = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -61,10 +63,10 @@ function Get-MavenLatestVersion {
 $info = Get-Content -LiteralPath "build.info.json" -Raw | ConvertFrom-Json
 $loaders = @($info.loaders)
 $gameVersions = @($info.game_versions)
-if ($GameVersions) {
-    $requested = @($GameVersions -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+if ($VersionFilter) {
+    $requested = @($VersionFilter -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     $unknown = @($requested | Where-Object { $gameVersions -notcontains $_ })
-    if ($unknown) { throw "Unknown Minecraft version(s) in -GameVersions: $($unknown -join ', ')" }
+    if ($unknown) { throw "Unknown Minecraft version(s) in -VersionFilter: $($unknown -join ', ')" }
     $gameVersions = $requested
 }
 
