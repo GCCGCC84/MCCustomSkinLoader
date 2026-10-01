@@ -661,13 +661,26 @@ public final class Agent implements Opcodes {
         });
     }
 
+    /**
+     * The game's constructor. Forge moves the icon loading into its own method (SRG func_216529_a on
+     * 1.15), so looking only for the method that loads the icon left those classes unpatched; the
+     * constructor is now picked by name, preferring the one that also loads the icon and otherwise the
+     * largest one (the game's own constructor).
+     */
     private static MethodNode findGameConstructor(ClassNode classNode) {
+        MethodNode largest = null;
         for (MethodNode methodNode : classNode.methods) {
+            if (!"<init>".equals(methodNode.name)) {
+                continue;
+            }
             if (loadsIconResource(methodNode)) {
                 return methodNode;
             }
+            if (largest == null || methodNode.instructions.size() > largest.instructions.size()) {
+                largest = methodNode;
+            }
         }
-        return null;
+        return largest;
     }
 
     /** Finds the "if (serverAddress != null)" test: the last ALOAD followed by an IFNULL. */
