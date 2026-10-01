@@ -53,8 +53,40 @@ public final class AgentBridge {
         host = null;
         port = 0;
         extras = null;
-        System.out.println("[agent] deferJoin: overlay cleared by " + setter + ", joining now");
-        joinNow(instance, address, addressPort, extraLocals);
+        final Runnable join = new Runnable() {
+            @Override
+            public void run() {
+                joinNow(instance, address, addressPort, extraLocals);
+            }
+        };
+        // Joining right here runs inside the render thread's resource reload path; 1.15/1.15.1/1.17
+        // joined and then went silent for the rest of the test window that way. Hand the work to the
+        // game's own task queue instead - a void method taking a single Runnable, found by shape, so no
+        // mapping name is involved - which runs it at the next safe point of the main loop.
+        Method executor = findExecutor(instance);
+        if (executor == null) {
+            System.out.println("[agent] deferJoin: overlay cleared by " + setter + ", no task queue, joining inline");
+            join.run();
+            return;
+        }
+        try {
+            System.out.println("[agent] deferJoin: overlay cleared by " + setter + ", joining on the game thread");
+            executor.invoke(instance, join);
+        } catch (Throwable throwable) {
+            System.out.println("[agent] deferJoin: scheduling failed (" + throwable + "), joining inline");
+            join.run();
+        }
+    }
+
+    /** A void method of the game class taking a single Runnable, i.e. its task queue. */
+    private static Method findExecutor(Object instance) {
+        for (Method method : instance.getClass().getMethods()) {
+            Class<?>[] parameters = method.getParameterTypes();
+            if (parameters.length == 1 && parameters[0] == Runnable.class && method.getReturnType() == void.class) {
+                return method;
+            }
+        }
+        return null;
     }
 
     private static void joinNow(Object instance, String address, int addressPort, Object[] extraLocals) {
