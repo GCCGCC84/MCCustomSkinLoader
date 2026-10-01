@@ -18,20 +18,16 @@ public final class AgentBridge {
     private AgentBridge() {
     }
 
-    /**
-     * Called from Minecraft's constructor; the join itself waits for {@link #onSet}. The address may be
-     * null: 1.14 keeps host and port inside an object that arrives through {@code extraLocals}, and the
-     * generated method then ignores its own String and int parameters.
-     */
+    /** Called from Minecraft's constructor; the join itself waits for {@link #onSet}. */
     public static void deferJoin(Object minecraftInstance, String address, int addressPort, Object[] extraLocals) {
-        if (minecraftInstance == null) {
+        if (minecraftInstance == null || address == null) {
             return;
         }
         minecraft = minecraftInstance;
         host = address;
         port = addressPort;
         extras = extraLocals == null ? new Object[0] : extraLocals;
-        System.out.println("[agent] deferJoin: joining " + (address == null ? "the address in the extras" : address + ":" + addressPort)
+        System.out.println("[agent] deferJoin: joining " + address + ":" + addressPort
                 + " after the first resource reload");
     }
 
@@ -46,7 +42,7 @@ public final class AgentBridge {
             screenSeen = true;
             return;
         }
-        if (!screenSeen || minecraft == null) {
+        if (!screenSeen || host == null || minecraft == null) {
             return;
         }
         final Object instance = minecraft;
@@ -57,7 +53,6 @@ public final class AgentBridge {
         host = null;
         port = 0;
         extras = null;
-        screenSeen = false;
         System.out.println("[agent] deferJoin: overlay cleared by " + setter + ", joining now");
         joinNow(instance, address, addressPort, extraLocals);
     }

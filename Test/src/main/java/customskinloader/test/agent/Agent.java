@@ -278,62 +278,29 @@ public final class Agent implements Opcodes {
             log("deferJoin: no constructor loads " + GAME_MARKER);
             return false;
         }
-        if (findMethod(classNode, JOIN_METHOD, "(Ljava/lang/String;I[Ljava/lang/Object;)V") != null) {
-            // Fabric/Quilt retransform the game class (Mixin), which calls this transformer again with
-            // its own output; patching that a second time produced classes the verifier rejects.
-            log("deferJoin: " + classNode.name + " already carries " + JOIN_METHOD + ", left unchanged");
+        InsnList instructions = constructor.instructions;
+        JumpInsnNode addressCheck = findAddressCheck(instructions);
+        VarInsnNode addressNode = addressCheck == null ? null : (VarInsnNode) addressCheck.getPrevious();
+        if (addressNode == null || addressCheck.getNext() == null) {
+            log("deferJoin: no server address check in " + constructor.name);
             return false;
         }
-        InsnList instructions = constructor.instructions;
-        // 1.14 does not keep the server address in a local before the branch, so the connect code is
-        // looked up by content instead of by "the last ALOAD followed by IFNULL": the last forward
-        // branch whose body builds a screen or starts a connection, sets the screen, and only reads
-        // "this", object locals and at most one int (the port).
-        AbstractInsnNode connectStart = null;
-        AbstractInsnNode connectEnd = null;
-        JumpInsnNode connectBranch = null;
-        List<Integer> extraLocals = null;
-        List<Integer> allForeignLocals = null;
-        String rejection = null;
-        int hostLocal = -1;
-        for (AbstractInsnNode candidate = instructions.getLast(); candidate != null; candidate = candidate.getPrevious()) {
-            if (!(candidate instanceof JumpInsnNode) || !isAfter(((JumpInsnNode) candidate).label, candidate)) {
-                continue;
-            }
-            AbstractInsnNode start = candidate.getNext();
-            while (start != null && (start instanceof LabelNode || start instanceof LineNumberNode || start instanceof FrameNode)) {
-                start = start.getNext();
-            }
-            // The jump to the other path at the end of the true branch is a boundary, not part of the
-            // block: stop in front of it.
-            AbstractInsnNode stop = ((JumpInsnNode) candidate).label;
-            AbstractInsnNode last = stop.getPrevious();
-            while (last != null && (last instanceof LabelNode || last instanceof LineNumberNode || last instanceof FrameNode)) {
-                last = last.getPrevious();
-            }
-            if (last != null && last.getOpcode() == GOTO) {
-                stop = last;
-            }
-            List<Integer> candidateExtras = new ArrayList<Integer>();
-            List<Integer> candidateForeign = new ArrayList<Integer>();
-            String reason = rejectConnectBranch(constructor, start, stop,
-                    hostLocalOf(candidate), candidateExtras, candidateForeign);
-            if (reason == null) {
-                connectStart = start;
-                connectEnd = stop;
-                connectBranch = (JumpInsnNode) candidate;
-                hostLocal = hostLocalOf(candidate);
-                extraLocals = candidateExtras;
-                allForeignLocals = candidateForeign;
-                break;
-            }
-            if (rejection == null) {
-                rejection = reason;
-            }
+        // The branch starts behind the label, line number and frame entries of this position; they stay
+        // in the constructor, where nothing depends on them any more once the body has moved.
+        AbstractInsnNode connectStart = addressCheck.getNext();
+        while (connectStart != null && (connectStart instanceof LabelNode || connectStart instanceof LineNumberNode || connectStart instanceof FrameNode)) {
+            connectStart = connectStart.getNext();
         }
-        if (connectStart == null || connectStart == connectEnd) {
-            log("deferJoin: no connect branch in " + constructor.name
-                    + (rejection == null ? "" : " (" + rejection + ")") + ", left unchanged");
+        AbstractInsnNode connectEnd = connectStart == null ? null : findNext(instructions, GOTO, connectStart, null);
+        if (connectEnd == null) {
+            log("deferJoin: the connect branch does not end with a branch in " + constructor.name);
+            return false;
+        }
+        List<Integer> extraLocals = new ArrayList<Integer>();
+        List<Integer> allForeignLocals = new ArrayList<Integer>();
+        String rejection = rejectConnectBranch(constructor, connectStart, connectEnd, addressNode.var, extraLocals, allForeignLocals);
+        if (rejection != null) {
+            log("deferJoin: " + rejection + " in " + constructor.name + ", left unchanged");
             return false;
         }
         List<MethodInsnNode> setters = findSetters(constructor, classNode.name);
@@ -342,8 +309,8 @@ public final class Agent implements Opcodes {
             return false;
         }
 
-        // 1.14 passes host and port inside an object local, so there may be neither a host nor a port
-        // local at all.
+        int hostLocal = addressNode.var;
+        // 1.14 passes host and port inside an object local, so there may be no port local at all.
         AbstractInsnNode portNode = findNext(instructions, ILOAD, connectStart, connectEnd);
         int portLocal = portNode == null ? 0 : ((VarInsnNode) portNode).var;
         List<String> extraTypes = new ArrayList<String>();
@@ -394,7 +361,7 @@ public final class Agent implements Opcodes {
             }
             if (current instanceof VarInsnNode) {
                 VarInsnNode variable = (VarInsnNode) current;
-                if (hostLocal >= 0 && variable.var == hostLocal) {
+                if (variable.var == hostLocal) {
                     variable.var = 1;
                 } else if (variable.var == portLocal) {
                     variable.var = 2;
@@ -422,7 +389,7 @@ public final class Agent implements Opcodes {
         // screen and the bridge joins as soon as the loading overlay is gone.
         InsnList handover = new InsnList();
         handover.add(new VarInsnNode(ALOAD, 0));
-        handover.add(hostLocal < 0 ? new InsnNode(ACONST_NULL) : new VarInsnNode(ALOAD, hostLocal));
+        handover.add(new VarInsnNode(ALOAD, hostLocal));
         handover.add(portNode == null ? intConstant(0) : new VarInsnNode(ILOAD, portLocal));
         handover.add(intConstant(extraLocals.size()));
         handover.add(new TypeInsnNode(ANEWARRAY, "java/lang/Object"));
@@ -433,15 +400,10 @@ public final class Agent implements Opcodes {
             handover.add(new InsnNode(AASTORE));
         }
         handover.add(new MethodInsnNode(INVOKESTATIC, BRIDGE_CLASS, "deferJoin", "(Ljava/lang/Object;Ljava/lang/String;I[Ljava/lang/Object;)V", false));
-        instructions.insertBefore(connectBranch, handover);
-        int testedValues = connectBranch.getOpcode() == IF_ACMPEQ || connectBranch.getOpcode() == IF_ACMPNE
-                || connectBranch.getOpcode() == IF_ICMPEQ || connectBranch.getOpcode() == IF_ICMPNE
-                || connectBranch.getOpcode() == IF_ICMPLT || connectBranch.getOpcode() == IF_ICMPGE
-                || connectBranch.getOpcode() == IF_ICMPGT || connectBranch.getOpcode() == IF_ICMPLE ? 2 : 1;
-        for (int dropped = 0; dropped < testedValues; dropped++) {
-            instructions.insertBefore(connectBranch, new InsnNode(POP));
-        }
-        instructions.set(connectBranch, new JumpInsnNode(GOTO, connectBranch.label));
+        instructions.insertBefore(addressNode, handover);
+        instructions.insertBefore(addressCheck, new InsnNode(POP));
+        instructions.set(addressCheck, new JumpInsnNode(GOTO, addressCheck.label));
+        instructions.remove(connectEnd);
 
         StringBuilder hooked = new StringBuilder();
         for (MethodInsnNode setter : setters) {
@@ -479,10 +441,10 @@ public final class Agent implements Opcodes {
         for (AbstractInsnNode current = start; current != null && current != stop; current = current.getNext()) {
             size++;
             int opcode = current.getOpcode();
-            if (opcode == NEW || opcode == INVOKESTATIC) {
+            if (opcode == NEW || opcode == INVOKEVIRTUAL || opcode == INVOKESTATIC || opcode == INVOKESPECIAL) {
                 acts = true;
             }
-            if (opcode == ALOAD && hostLocal >= 0 && ((VarInsnNode) current).var == hostLocal) {
+            if (opcode == ALOAD && ((VarInsnNode) current).var == hostLocal) {
                 usesContext = true;
             }
             if (current instanceof JumpInsnNode && !between(((JumpInsnNode) current).label, start, stop)) {
@@ -511,7 +473,7 @@ public final class Agent implements Opcodes {
             }
         }
         if (!acts) {
-            return "the connect branch neither builds a screen nor starts a connection";
+            return "the connect branch does nothing";
         }
         if (!usesContext) {
             // The branch has to consume the address the guard tested, otherwise it is not the connect
@@ -708,27 +670,18 @@ public final class Agent implements Opcodes {
         return null;
     }
 
-    /**
-     * The local the branch condition loaded, when it loaded one: for the vanilla shape that is the
-     * server address. -1 means the condition tests something else (a field, a call) and the address
-     * only travels inside the object locals the branch reads.
-     */
-    private static int hostLocalOf(AbstractInsnNode branch) {
-        AbstractInsnNode previous = branch.getPrevious();
-        if (previous instanceof VarInsnNode && previous.getOpcode() == ALOAD) {
-            return ((VarInsnNode) previous).var;
-        }
-        return -1;
-    }
-
-    /** True when the node lies after the reference in the instruction list. */
-    private static boolean isAfter(AbstractInsnNode node, AbstractInsnNode reference) {
-        for (AbstractInsnNode current = reference.getNext(); current != null; current = current.getNext()) {
-            if (current == node) {
-                return true;
+    /** Finds the "if (serverAddress != null)" test: the last ALOAD followed by an IFNULL. */
+    private static JumpInsnNode findAddressCheck(InsnList instructions) {
+        for (AbstractInsnNode current = instructions.getLast(); current != null; current = current.getPrevious()) {
+            if (current.getOpcode() != IFNULL) {
+                continue;
+            }
+            AbstractInsnNode previous = current.getPrevious();
+            if (previous != null && previous.getOpcode() == ALOAD) {
+                return (JumpInsnNode) current;
             }
         }
-        return false;
+        return null;
     }
 
     private static AbstractInsnNode findLast(InsnList instructions, int opcode, AbstractInsnNode before) {
