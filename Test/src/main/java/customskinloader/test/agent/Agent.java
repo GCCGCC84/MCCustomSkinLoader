@@ -293,11 +293,9 @@ public final class Agent implements Opcodes {
             log("deferJoin: " + rejection + " in " + constructor.name + ", left unchanged");
             return false;
         }
-        MethodInsnNode overlayCall = findLastOverlayCall(constructor, classNode.name);
-        MethodNode overlaySetter = overlayCall == null ? null : findMethod(classNode, overlayCall.name, overlayCall.desc);
-        if (overlaySetter == null || (overlaySetter.access & ACC_STATIC) != 0
-                || Type.getArgumentTypes(overlaySetter.desc).length != 1) {
-            log("deferJoin: no overlay setter in " + classNode.name + ", left unchanged");
+        List<MethodInsnNode> setters = findSetters(constructor, classNode.name);
+        if (setters.isEmpty()) {
+            log("deferJoin: no screen or overlay setter in " + constructor.name + ", left unchanged");
             return false;
         }
 
@@ -332,15 +330,23 @@ public final class Agent implements Opcodes {
         instructions.set(addressCheck, new JumpInsnNode(GOTO, addressCheck.label));
         instructions.remove(connectEnd);
 
-        InsnList hook = new InsnList();
-        hook.add(new VarInsnNode(ALOAD, 0));
-        hook.add(new VarInsnNode(ALOAD, 1));
-        hook.add(new MethodInsnNode(INVOKESTATIC, BRIDGE_CLASS, "onOverlayChanged", "(Ljava/lang/Object;Ljava/lang/Object;)V", false));
-        overlaySetter.instructions.insert(hook);
+        StringBuilder hooked = new StringBuilder();
+        for (MethodInsnNode setter : setters) {
+            MethodNode setterMethod = findMethod(classNode, setter.name, setter.desc);
+            InsnList hook = new InsnList();
+            hook.add(new VarInsnNode(ALOAD, 0));
+            hook.add(new VarInsnNode(ALOAD, 1));
+            hook.add(new LdcInsnNode(setter.name + setter.desc));
+            hook.add(new MethodInsnNode(INVOKESTATIC, BRIDGE_CLASS, "onSet", "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/String;)V", false));
+            setterMethod.instructions.insert(hook);
+            if (hooked.length() > 0) {
+                hooked.append(", ");
+            }
+            hooked.append(setter.name).append(setter.desc);
+        }
 
-        log("deferJoin: connect branch moved to " + JOIN_METHOD + ", join runs when the overlay is cleared"
-                + " (host local " + hostLocal + ", port local " + portLocal
-                + ", overlay setter " + overlayCall.name + overlayCall.desc + ")");
+        log("deferJoin: connect branch moved to " + JOIN_METHOD + " (host local " + hostLocal
+                + ", port local " + portLocal + "), join runs when the overlay is cleared (setters: " + hooked + ")");
         return true;
     }
 
@@ -397,19 +403,33 @@ public final class Agent implements Opcodes {
         return null;
     }
 
-    /** The overlay setter is the last call the constructor makes on the game class with one argument. */
-    private static MethodInsnNode findLastOverlayCall(MethodNode constructor, String gameClass) {
-        for (AbstractInsnNode current = constructor.instructions.getLast(); current != null; current = current.getPrevious()) {
+    /**
+     * The setters the constructor uses for the screen and the loading overlay: instance methods of the
+     * game class that take a single object. Which of them is the overlay setter is decided at runtime
+     * by {@link AgentBridge#onSet} - it is the one that gets cleared after the reload - so the patch
+     * does not have to guess it from mapping names or from the call order (1.17/1.18 call setScreen
+     * once more after setOverlay).
+     */
+    private static List<MethodInsnNode> findSetters(MethodNode constructor, String gameClass) {
+        List<MethodInsnNode> setters = new ArrayList<MethodInsnNode>();
+        for (AbstractInsnNode current = constructor.instructions.getFirst(); current != null; current = current.getNext()) {
             if (!(current instanceof MethodInsnNode)) {
                 continue;
             }
             MethodInsnNode call = (MethodInsnNode) current;
-            if (call.getOpcode() == INVOKEVIRTUAL && gameClass.equals(call.owner)
-                    && call.desc.startsWith("(L") && call.desc.endsWith(";)V")) {
-                return call;
+            if (call.getOpcode() != INVOKEVIRTUAL || !gameClass.equals(call.owner)
+                    || !call.desc.startsWith("(L") || !call.desc.endsWith(";)V")) {
+                continue;
+            }
+            boolean seen = false;
+            for (MethodInsnNode setter : setters) {
+                seen |= setter.name.equals(call.name) && setter.desc.equals(call.desc);
+            }
+            if (!seen) {
+                setters.add(call);
             }
         }
-        return null;
+        return setters;
     }
 
     private static MethodNode findMethod(ClassNode classNode, String name, String desc) {

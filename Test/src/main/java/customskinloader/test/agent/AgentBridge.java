@@ -9,6 +9,7 @@ import java.lang.reflect.Method;
  * agent added to it, so no mapping name has to be known anywhere.
  */
 public final class AgentBridge {
+    private static volatile boolean screenSeen;
     private static volatile Object minecraft;
     private static volatile String host;
     private static volatile int port;
@@ -28,14 +29,20 @@ public final class AgentBridge {
     }
 
     /**
-     * Called from Minecraft's overlay setter. The loading overlay is cleared exactly when the first
-     * resource reload has finished, which is the point where the world may be rendered, so the join
-     * runs here instead of in the constructor.
+     * Called from the screen and overlay setters of the game class. A screen shows up first (the
+     * title screen the constructor sets), and the loading overlay is cleared exactly when the first
+     * resource reload has finished, which is the point where the world may be rendered: that clear is
+     * what the pending join waits for, no matter which of the setters it is.
      */
-    public static void onOverlayChanged(Object overlay) {
-        if (overlay != null || host == null || minecraft == null) {
+    public static void onSet(Object value, String setter) {
+        if (value != null) {
+            screenSeen = true;
             return;
         }
+        if (!screenSeen || host == null || minecraft == null) {
+            return;
+        }
+        System.out.println("[agent] deferJoin: overlay cleared by " + setter + ", joining now");
         Object instance = minecraft;
         String address = host;
         int addressPort = port;
