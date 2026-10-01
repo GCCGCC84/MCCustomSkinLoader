@@ -172,6 +172,26 @@ function ConvertTo-PowerShellLiteral {
     return "'" + $Value.Replace("'", "''") + "'"
 }
 
+function Assert-JvmArguments {
+    param([string[]]$JvmArguments, [string]$ClientDirectory)
+    # JPLIS splits -javaagent at the first '='. The older ':icon' form made the JVM look for a file
+    # named "<jar>:icon", so every client of the affected combos died with "agent library failed to
+    # init: instrument" and the workaround never ran. Fail before the client starts instead.
+    foreach ($argument in $JvmArguments) {
+        if (-not $argument.StartsWith("-javaagent:")) { continue }
+        $specification = $argument.Substring("-javaagent:".Length)
+        $separator = $specification.IndexOf("=")
+        if ($separator -lt 0 -or -not $specification.Substring($separator + 1)) {
+            throw "Invalid javaagent argument '$argument': expected '-javaagent:<jar>=<workaround>[,<workaround>]'"
+        }
+        $jar = $specification.Substring(0, $separator)
+        $jarPath = if ([System.IO.Path]::IsPathRooted($jar)) { $jar } else { Join-Path $ClientDirectory $jar }
+        if (-not (Test-Path -LiteralPath $jarPath -PathType Leaf)) {
+            throw "javaagent jar not found for '$argument': $jarPath"
+        }
+    }
+}
+
 function Expand-ArgumentList {
     param($Arguments)
     $result = @()
@@ -505,6 +525,8 @@ foreach ($versionObject in $allVersions) {
                 if ($matched) { break }
             }
             if (-not $matched) { continue }
+            $workaroundName = if ($entry.Name) { [string]$entry.Name } else { 'unnamed' }
+            Write-Host "[$(Get-Date -Format s)] [workaround] $workaroundName applies to $versionId"
             if ($entry.JvmArgs) { $extraJvmArguments += @([string]$entry.JvmArgs -split "\s+" | Where-Object { $_ }) }
             if ($entry.AppArgs) { $extraGameArguments += @([string]$entry.AppArgs -split "\s+" | Where-Object { $_ }) }
         }
@@ -535,6 +557,7 @@ foreach ($versionObject in $allVersions) {
 
     $jvmArguments += $extraJvmArguments
     $gameArguments += $extraGameArguments
+    Assert-JvmArguments -JvmArguments $jvmArguments -ClientDirectory $ClientDir
 
     $classpathPaths = @()
     $seenLibraries = @{}

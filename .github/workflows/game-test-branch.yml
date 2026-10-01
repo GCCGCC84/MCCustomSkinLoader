@@ -1,0 +1,29 @@
+# Verification scaffolding for the throw-away branch ci/game-test-workarounds: it runs the game tests
+# for that branch without publishing a release, so the test-agent workarounds can be checked against
+# CI. Delete this file together with the branch.
+name: Game Test (verification branch)
+
+on:
+  push:
+    branches: ['ci/game-test-workarounds']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/build
+        with:
+          artifact-name: CustomSkinLoader-Verify-${{ github.run_number }}
+
+  test:
+    name: Test
+    needs: build
+    uses: ./.github/workflows/test.yml
+    with:
+      artifact-name: CustomSkinLoader-Verify-${{ github.run_number }}
