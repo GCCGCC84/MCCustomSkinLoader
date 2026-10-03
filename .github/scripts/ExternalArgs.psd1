@@ -9,7 +9,7 @@
                     VersionRange = @('1.14', '1.17')
                 }
             )
-            JvmArgs = '-javaagent:CustomSkinLoader-Test-1.0.0.jar=MC145102FixTransformer'
+            JvmArgs = '-javaagent:CustomSkinLoader-Test-1.0.0.jar=MC145102Fix'
         },
         @{ #
             Matrix = @(
