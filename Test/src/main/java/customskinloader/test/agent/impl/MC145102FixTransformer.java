@@ -19,16 +19,19 @@ import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.IincInsnNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
+import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TryCatchBlockNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
 public class MC145102FixTransformer implements ClassFileTransformer {
-    private Target target;
+    private String version;
 
     public MC145102FixTransformer() {
         try (InputStream is = ClassLoader.getSystemResourceAsStream("version.json");
@@ -43,7 +46,7 @@ public class MC145102FixTransformer implements ClassFileTransformer {
             Pattern pattern = Pattern.compile("\"name\"\\s*:\\s*\"([^\"]*)\"");
             Matcher matcher = pattern.matcher(sb.toString());
             if (matcher.find()) {
-                this.target = targetFor(matcher.group(1));
+                this.version = matcher.group(1);
             }
         } catch (IOException e) {
             throw new RuntimeException("Failed to read version information from version.json", e);
@@ -53,93 +56,124 @@ public class MC145102FixTransformer implements ClassFileTransformer {
     @Override
     public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined, ProtectionDomain protectionDomain, byte[] classfileBuffer) {
         if ("net/minecraft/class_310".equals(className)) {
-            ClassNode classNode = new ClassNode();
-            new ClassReader(classfileBuffer).accept(classNode, ClassReader.EXPAND_FRAMES);
-
-            MethodNode enclosing = null;
-            for (MethodNode method : classNode.methods) {
-                if (containsTitleScreen(method, this.target) && findLambdaCall(method, target.l1Name, target.l1Desc) != null) {
-                    enclosing = method;
-                    break;
-                }
-            }
-            if (enclosing == null) {
-                throw new IllegalStateException("no method builds a " + target.titleScreen + " and creates " + target.l1Name + target.l1Desc);
-            }
-
-            ScreenBlock block = locateScreenBlock(enclosing, this.target);
-            InsnList moved = extract(enclosing, block);
-
-            MethodNode lambda = findMethod(classNode, target.l1Name, target.l1Desc);
-            if (lambda == null) {
-                throw new IllegalStateException("splash callback lambda " + target.l1Name + target.l1Desc + " not found");
-            }
-
-            int sSlot = -1;
-            int iSlot = -1;
-            if (!block.fieldBased) {
-                // 1.15+: thread the auto connect server name/port through the lambda chain as captures
-                InvokeDynamicInsnNode call = findLambdaCall(enclosing, target.l1Name, target.l1Desc);
-                int[] slots = addCaptures(enclosing, call, lambda, block.sSlot, block.iSlot);
-                if (target.l2Name != null) {
-                    MethodNode inner = findMethod(classNode, target.l2Name, target.l2Desc);
-                    if (inner == null) {
-                        throw new IllegalStateException("nested lambda " + target.l2Name + target.l2Desc + " not found");
-                    }
-                    InvokeDynamicInsnNode innerCall = findLambdaCall(lambda, target.l2Name, target.l2Desc);
-                    if (innerCall == null) {
-                        throw new IllegalStateException("call site of " + target.l2Name + target.l2Desc + " not found in " + lambda.name + lambda.desc);
-                    }
-                    int[] innerSlots = addCaptures(lambda, innerCall, inner, slots[0], slots[1]);
-                    lambda = inner;
-                    sSlot = innerSlots[0];
-                    iSlot = innerSlots[1];
-                } else {
-                    sSlot = slots[0];
-                    iSlot = slots[1];
-                }
-            }
-
-            for (AbstractInsnNode insn : moved) {
-                if (insn instanceof VarInsnNode) {
-                    VarInsnNode var = (VarInsnNode) insn;
-                    if (var.var == block.sSlot && !block.fieldBased) {
-                        var.var = sSlot;
-                    } else if (var.var == block.iSlot && !block.fieldBased) {
-                        var.var = iSlot;
-                    }
-                }
-            }
-            insertBeforeReturn(lambda, moved);
-
-            ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS) {
-                @Override
-                protected String getCommonSuperClass(String type1, String type2) {
-                    try {
-                        Class<?> class1 = Class.forName(type1.replace('/', '.'), false, loader);
-                        Class<?> class2 = Class.forName(type2.replace('/', '.'), false, loader);
-                        if (class1.isAssignableFrom(class2)) {
-                            return type1;
-                        }
-                        if (class2.isAssignableFrom(class1)) {
-                            return type2;
-                        }
-                        if (class1.isInterface() || class2.isInterface()) {
-                            return "java/lang/Object";
-                        }
-                        do {
-                            class1 = class1.getSuperclass();
-                        } while (!class1.isAssignableFrom(class2));
-                        return class1.getName().replace('.', '/');
-                    } catch (Throwable t) {
-                        return "java/lang/Object";
-                    }
-                }
-            };
-            classNode.accept(writer);
-            return writer.toByteArray();
+            return transformMinecraft(loader, classfileBuffer, targetFor(this.version));
+        } else if ("net/minecraft/class_425".equals(className) && !this.version.startsWith("1.14")) {
+            return transformLoadingOverlay(loader, classfileBuffer, "field_17771");
+        } else if ("net/minecraft/client/gui/ResourceLoadProgressGui".equals(className)) {
+            return transformLoadingOverlay(loader, classfileBuffer, "field_212979_g");
         }
         return classfileBuffer;
+    }
+
+    private static byte[] transformMinecraft(ClassLoader loader, byte[] classfileBuffer, Target target) {
+        ClassNode classNode = new ClassNode();
+        new ClassReader(classfileBuffer).accept(classNode, ClassReader.EXPAND_FRAMES);
+
+        MethodNode enclosing = null;
+        for (MethodNode method : classNode.methods) {
+            if (containsTitleScreen(method, target) && findLambdaCall(method, target.l1Name, target.l1Desc) != null) {
+                enclosing = method;
+                break;
+            }
+        }
+        if (enclosing == null) {
+            throw new IllegalStateException("no method builds a " + target.titleScreen + " and creates " + target.l1Name + target.l1Desc);
+        }
+
+        ScreenBlock block = locateScreenBlock(enclosing, target);
+        InsnList moved = extract(enclosing, block);
+
+        MethodNode lambda = findMethod(classNode, target.l1Name, target.l1Desc);
+        if (lambda == null) {
+            throw new IllegalStateException("splash callback lambda " + target.l1Name + target.l1Desc + " not found");
+        }
+
+        int sSlot = -1;
+        int iSlot = -1;
+        if (!block.fieldBased) {
+            // 1.15+: thread the auto connect server name/port through the lambda chain as captures
+            InvokeDynamicInsnNode call = findLambdaCall(enclosing, target.l1Name, target.l1Desc);
+            int[] slots = addCaptures(enclosing, call, lambda, block.sSlot, block.iSlot);
+            if (target.l2Name != null) {
+                MethodNode inner = findMethod(classNode, target.l2Name, target.l2Desc);
+                if (inner == null) {
+                    throw new IllegalStateException("nested lambda " + target.l2Name + target.l2Desc + " not found");
+                }
+                InvokeDynamicInsnNode innerCall = findLambdaCall(lambda, target.l2Name, target.l2Desc);
+                if (innerCall == null) {
+                    throw new IllegalStateException("call site of " + target.l2Name + target.l2Desc + " not found in " + lambda.name + lambda.desc);
+                }
+                int[] innerSlots = addCaptures(lambda, innerCall, inner, slots[0], slots[1]);
+                lambda = inner;
+                sSlot = innerSlots[0];
+                iSlot = innerSlots[1];
+            } else {
+                sSlot = slots[0];
+                iSlot = slots[1];
+            }
+        }
+
+        for (AbstractInsnNode insn : moved) {
+            if (insn instanceof VarInsnNode) {
+                VarInsnNode var = (VarInsnNode) insn;
+                if (var.var == block.sSlot && !block.fieldBased) {
+                    var.var = sSlot;
+                } else if (var.var == block.iSlot && !block.fieldBased) {
+                    var.var = iSlot;
+                }
+            }
+        }
+        insertBeforeReturn(lambda, moved);
+
+        ClassWriter writer = createClassWriter(loader);
+        classNode.accept(writer);
+        return writer.toByteArray();
+    }
+
+    private static byte[] transformLoadingOverlay(ClassLoader loader, byte[] classfileBuffer, String fieldName) {
+        ClassNode classNode = new ClassNode();
+        new ClassReader(classfileBuffer).accept(classNode, ClassReader.EXPAND_FRAMES);
+
+        for (MethodNode method : classNode.methods) {
+            if (method.tryCatchBlocks == null || method.tryCatchBlocks.isEmpty()) {
+                continue;
+            }
+            TryCatchBlockNode tryCatch = method.tryCatchBlocks.get(0);
+            for (AbstractInsnNode insn : method.instructions.toArray()) {
+                // Locate: this.fadeOutStart = Util.getMillis()
+                if (insn.getOpcode() != Opcodes.PUTFIELD) {
+                    continue;
+                }
+                FieldInsnNode field = (FieldInsnNode) insn;
+                if (!/*"field_17771"*/fieldName.equals(field.name) || !"J".equals(field.desc)) {
+                    continue;
+                }
+                AbstractInsnNode call = insn.getPrevious();  // INVOKESTATIC Util.getMillis()
+                AbstractInsnNode self = call.getPrevious();  // ALOAD 0
+
+                // Move the three instructions in front of the try block; newStart ends up right after
+                // getMillis(), so the try still begins at reload.checkExceptions(). Setting the timestamp
+                // before the callback keeps a re-entrant render (fired from the callback) from running it twice.
+                InsnList moved = new InsnList();
+                method.instructions.remove(self);
+                method.instructions.remove(call);
+                method.instructions.remove(insn);
+                moved.add(self);
+                moved.add(call);
+                moved.add(insn);
+
+                LabelNode start = tryCatch.start;
+                LabelNode newStart = new LabelNode();
+                method.instructions.insert(start, newStart);
+                method.instructions.insertBefore(newStart, moved);
+                tryCatch.start = newStart;
+                break;
+            }
+        }
+
+        ClassWriter writer = createClassWriter(loader);
+        classNode.accept(writer);
+        return writer.toByteArray();
     }
 
     /**
@@ -376,6 +410,33 @@ public class MC145102FixTransformer implements ClassFileTransformer {
             throw new IllegalStateException("lambda " + method.name + method.desc + " has no RETURN");
         }
         method.instructions.insertBefore(ret, moved);
+    }
+
+    private static ClassWriter createClassWriter(ClassLoader loader) {
+        return new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS) {
+            @Override
+            protected String getCommonSuperClass(String type1, String type2) {
+                try {
+                    Class<?> class1 = Class.forName(type1.replace('/', '.'), false, loader);
+                    Class<?> class2 = Class.forName(type2.replace('/', '.'), false, loader);
+                    if (class1.isAssignableFrom(class2)) {
+                        return type1;
+                    }
+                    if (class2.isAssignableFrom(class1)) {
+                        return type2;
+                    }
+                    if (class1.isInterface() || class2.isInterface()) {
+                        return "java/lang/Object";
+                    }
+                    do {
+                        class1 = class1.getSuperclass();
+                    } while (!class1.isAssignableFrom(class2));
+                    return class1.getName().replace('.', '/');
+                } catch (Throwable t) {
+                    return "java/lang/Object";
+                }
+            }
+        };
     }
 
     /** Names of the class/lambdas to patch, in whatever namespace the class is loaded in. */

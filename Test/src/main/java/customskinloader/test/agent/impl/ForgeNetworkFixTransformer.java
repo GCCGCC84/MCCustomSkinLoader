@@ -15,7 +15,6 @@ import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
-/** A standalone, narrow transformer for the Forge 25.0.223 client in this directory. */
 public class ForgeNetworkFixTransformer implements ClassFileTransformer {
     @Override
     public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined, ProtectionDomain protectionDomain, byte[] classfileBuffer) {
@@ -25,7 +24,7 @@ public class ForgeNetworkFixTransformer implements ClassFileTransformer {
                 ClassNode node = new ClassNode();
                 reader.accept(node, 0);
                 for (MethodNode method : node.methods) {
-                    if ("func_150723_a".equals(method.name) && "(Lnet/minecraft/network/EnumConnectionState;)V".equals(method.desc)) {
+                    if ("func_150723_a".equals(method.name) && ("(Lnet/minecraft/network/EnumConnectionState;)V".equals(method.desc) /* 1.13.2 */ || "(Lnet/minecraft/network/ProtocolType;)V".equals(method.desc) /* 1.14.x */ )) {
                         for (AbstractInsnNode current = method.instructions.getFirst(); current != null; current = current.getNext()) {
                             if (current.getOpcode() == Opcodes.INVOKEINTERFACE) {
                                 MethodInsnNode call = (MethodInsnNode) current;

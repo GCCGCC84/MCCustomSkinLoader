@@ -7,6 +7,10 @@
                 @{
                     Loaders = @('fabric', 'quilt')
                     VersionRange = @('1.14', '1.17')
+                },
+                @{
+                    Loaders = @('forge')
+                    VersionRange = @('1.15', '1.15.1')
                 }
             )
             JvmArgs = '-javaagent:CustomSkinLoader-Test-1.0.0.jar=MC145102Fix'
@@ -15,7 +19,7 @@
             Matrix = @(
                 @{
                     Loaders = @('forge')
-                    VersionRange = @('1.13.2', '1.13.2')
+                    VersionRange = @('1.13.2', '1.14.3')
                 }
             )
             JvmArgs = '-javaagent:CustomSkinLoader-Test-1.0.0.jar=ForgeNetworkFix'
