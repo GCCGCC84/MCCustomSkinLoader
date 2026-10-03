@@ -9,16 +9,16 @@
                     VersionRange = @('1.14', '1.17')
                 }
             )
-            JvmArgs = '-javaagent:CustomSkinLoader-Test-1.0.0.jar:icon'
+            JvmArgs = '-javaagent:CustomSkinLoader-Test-1.0.0.jar=MC145102FixTransformer'
         },
         @{ #
             Matrix = @(
                 @{
                     Loaders = @('forge')
-                    VersionRange = @('1.13.2', '1.14.3')
+                    VersionRange = @('1.13.2', '1.13.2')
                 }
             )
-            JvmArgs = '-javaagent:CustomSkinLoader-Test-1.0.0.jar:icon,preload'
+            JvmArgs = '-javaagent:CustomSkinLoader-Test-1.0.0.jar=ForgeNetworkFix'
         },
         @{ # Work around the 1.16.4/1.16.5 authlib returning invalid data and disabling multiplayer by setting an invalid proxy address.
             Matrix = @(
