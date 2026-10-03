@@ -104,10 +104,10 @@ jobs:
           name: test-diagnostics-${{ matrix.version }}
           path: |
             installer-logs
-            Test/run/client/crash-reports
-            Test/run/client/logs
+            Test/run/*/crash-reports
+            Test/run/*/logs
+            Test/run/*/hs_err*
             Test/run/client/CustomSkinLoader/CustomSkinLoader.log
-            Test/run/client/hs_err*
             Test/run/client/screenshots
           if-no-files-found: ignore
 

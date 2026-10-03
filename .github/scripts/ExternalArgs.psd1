@@ -6,7 +6,7 @@
             Matrix = @(
                 @{
                     Loaders = @('fabric', 'quilt')
-                    VersionRange = @('1.14', '1.17')
+                    VersionRange = @('1.14', '1.19')
                 },
                 @{
                     Loaders = @('forge')
@@ -31,13 +31,13 @@
                     VersionRange = @('1.16.4', '1.16.5')
                 }
             )
-            AppArgs = '--proxyHost 127.0.0.1'
+            JvmArgs = '-javaagent:CustomSkinLoader-Test-1.0.0.jar=AuthlibPrivilegesFix'
         },
         @{ #
             Matrix = @(
                 @{
                     Loaders = @('quilt')
-                    VersionRange = @('1.17.1', '1.17.1')
+                    VersionRange = @('1.17', '1.17.1')
                 }
             )
             JvmArgs = '-Dloader.systemLibraries=${library_directory}/com/mojang/blocklist/1.0.5/blocklist-1.0.5.jar${classpath_separator}${library_directory}/com/mojang/patchy/2.1.6/patchy-2.1.6.jar'

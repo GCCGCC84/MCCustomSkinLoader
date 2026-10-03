@@ -62,7 +62,7 @@ public class MC145102FixTransformer implements ClassFileTransformer {
         } else if ("net/minecraft/client/gui/ResourceLoadProgressGui".equals(className)) {
             return transformLoadingOverlay(loader, classfileBuffer, "field_212979_g");
         }
-        return classfileBuffer;
+        return null;
     }
 
     private static byte[] transformMinecraft(ClassLoader loader, byte[] classfileBuffer, Target target) {
@@ -187,7 +187,7 @@ public class MC145102FixTransformer implements ClassFileTransformer {
             return new Target("net/minecraft/class_442", "method_18504", "()V", null, null);
         } else if (mcVersion.startsWith("1.15")) {
             return new Target("net/minecraft/class_442", "method_24040", "(Ljava/util/List;Ljava/util/Optional;)V", "method_24227", "(Ljava/util/List;)V");
-        } else if (mcVersion.startsWith("1.16") || mcVersion.equals("1.17")) {
+        } else if (mcVersion.startsWith("1.16") || mcVersion.equals("1.17") || mcVersion.equals("1.18") || mcVersion.equals("1.19")) {
             return new Target("net/minecraft/class_442", "method_24040", "(Ljava/util/Optional;)V", "method_29338", "()V");
         }
         return null;

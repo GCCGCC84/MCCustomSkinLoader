@@ -170,8 +170,8 @@ if ($serverReady) {
             continue
         }
 
-        Write-Host "[$clientName] skin loaded, waiting 1 second"
-        Start-Sleep -Seconds 1
+        Write-Host "[$clientName] skin loaded, waiting 5 second"
+        Start-Sleep -Seconds 5
         if (-not (Send-GameKeys)) {
             $failed = $true
         }
