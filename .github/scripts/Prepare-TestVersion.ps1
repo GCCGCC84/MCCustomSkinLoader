@@ -45,7 +45,11 @@ $AssetObjectsDir = Join-Path $AssetsDir "objects"
 $LogConfigsDir = Join-Path $AssetsDir "log_configs"
 
 function Invoke-Downloads {
-    param([object[]]$Downloads)
+    param(
+        [object[]]$Downloads,
+        [bool]$WarnOnFailure = $false
+    )
+
     if (-not $Downloads -or $Downloads.Count -eq 0) { return }
     $Downloads | ForEach-Object -Parallel {
         $url = [string]$_.Url
@@ -77,7 +81,13 @@ function Invoke-Downloads {
                 return
             } catch {
                 if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
-                if ($attempt -ge 5) { throw "Failed to download $url : $($_.Exception.Message)" }
+                if ($attempt -ge 5) {
+                    if ($WarnOnFailure) {
+                        Write-Warning "Failed to download $url : $($_.Exception.Message)"
+                        return
+                    }
+                    throw "Failed to download $url : $($_.Exception.Message)"
+                }
                 Start-Sleep -Seconds ($attempt * 2)
             }
         }
@@ -464,7 +474,7 @@ foreach ($hash in $assetHashes.Keys) {
         Sha1 = $hash
     })
 }
-Invoke-Downloads -Downloads $assetDownloads.ToArray()
+Invoke-Downloads -Downloads $assetDownloads.ToArray() -WarnOnFailure $true
 
 Write-Host "[$(Get-Date -Format s)] Generating launch scripts"
 $legacyJvmArguments = @(
