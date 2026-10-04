@@ -535,7 +535,6 @@ foreach ($versionObject in $allVersions) {
     if ($gameArguments -notcontains "--quickPlayMultiplayer") {
         $gameArguments += @("--server", $ServerAddress, "--port", "$ServerPort")
     }
-    $gameArguments += @("--width", "1366", "--height", "768")
 
     $loggingConfigPath = ""
     $logging = $versionObject.logging
