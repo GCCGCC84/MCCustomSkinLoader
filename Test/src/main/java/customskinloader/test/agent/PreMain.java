@@ -5,6 +5,7 @@ import java.lang.instrument.Instrumentation;
 import customskinloader.test.agent.impl.AuthlibPrivilegesFixTransformer;
 import customskinloader.test.agent.impl.ForgeNetworkFixTransformer;
 import customskinloader.test.agent.impl.MC145102FixTransformer;
+import customskinloader.test.agent.impl.NeoForgeVanillaFilterFixTransformer;
 
 public final class PreMain {
     public static void premain(String agentArgs, Instrumentation instrumentation) {
@@ -17,6 +18,9 @@ public final class PreMain {
                 break;
             case "MC145102Fix":
                 instrumentation.addTransformer(new MC145102FixTransformer());
+                break;
+            case "NeoForgeVanillaFilterFix":
+                instrumentation.addTransformer(new NeoForgeVanillaFilterFixTransformer());
                 break;
         }
     }

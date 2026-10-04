@@ -2,20 +2,7 @@
 # that may occur when running CI tests on certain Minecraft versions.
 @{
     Args = @(
-        @{ #
-            Matrix = @(
-                @{
-                    Loaders = @('fabric', 'quilt')
-                    VersionRange = @('1.14', '1.19')
-                },
-                @{
-                    Loaders = @('forge')
-                    VersionRange = @('1.15', '1.15.1')
-                }
-            )
-            JvmArgs = '-javaagent:CustomSkinLoader-Test-1.0.0.jar=MC145102Fix'
-        },
-        @{ #
+        @{
             Matrix = @(
                 @{
                     Loaders = @('forge')
@@ -24,7 +11,20 @@
             )
             JvmArgs = '-javaagent:CustomSkinLoader-Test-1.0.0.jar=ForgeNetworkFix'
         },
-        @{ # Work around the 1.16.4/1.16.5 authlib returning invalid data and disabling multiplayer by setting an invalid proxy address.
+        @{
+            Matrix = @(
+                @{
+                    Loaders = @('fabric', 'quilt')
+                    VersionRange = @('1.14', '1.19')
+                },
+                @{
+                    Loaders = @('forge')
+                    VersionRange = @('1.14.2', '1.14.3', '1.15', '1.15.1')
+                }
+            )
+            JvmArgs = '-javaagent:CustomSkinLoader-Test-1.0.0.jar=MC145102Fix'
+        },
+        @{
             Matrix = @(
                 @{
                     Loaders = @('fabric', 'forge', 'quilt')
@@ -33,7 +33,7 @@
             )
             JvmArgs = '-javaagent:CustomSkinLoader-Test-1.0.0.jar=AuthlibPrivilegesFix'
         },
-        @{ #
+        @{
             Matrix = @(
                 @{
                     Loaders = @('quilt')
@@ -42,7 +42,7 @@
             )
             JvmArgs = '-Dloader.systemLibraries=${library_directory}/com/mojang/blocklist/1.0.5/blocklist-1.0.5.jar${classpath_separator}${library_directory}/com/mojang/patchy/2.1.6/patchy-2.1.6.jar'
         },
-        @{ #
+        @{
             Matrix = @(
                 @{
                     Loaders = @('quilt')
@@ -50,6 +50,15 @@
                 }
             )
             JvmArgs = '-Dloader.systemLibraries=${library_directory}/com/mojang/blocklist/1.0.6/blocklist-1.0.6.jar${classpath_separator}${library_directory}/com/mojang/patchy/2.1.6/patchy-2.1.6.jar'
+        },
+        @{
+            Matrix = @(
+                @{
+                    Loaders = @('neoforge')
+                    VersionRange = @('1.20.5', '26.1.2')
+                }
+            )
+            JvmArgs = '-javaagent:CustomSkinLoader-Test-1.0.0.jar=NeoForgeVanillaFilterFix'
         }
     )
 }

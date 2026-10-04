@@ -56,7 +56,9 @@ public class MC145102FixTransformer implements ClassFileTransformer {
     @Override
     public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined, ProtectionDomain protectionDomain, byte[] classfileBuffer) {
         if ("net/minecraft/class_310".equals(className)) {
-            return transformMinecraft(loader, classfileBuffer, targetFor(this.version));
+            return transformMinecraft(loader, classfileBuffer, targetFor(this.version, false));
+        } else if ("net/minecraft/client/Minecraft".equals(className)) {
+            return transformMinecraft(loader, classfileBuffer, targetFor(this.version, true));
         } else if ("net/minecraft/class_425".equals(className) && !this.version.startsWith("1.14")) {
             return transformLoadingOverlay(loader, classfileBuffer, "field_17771");
         } else if ("net/minecraft/client/gui/ResourceLoadProgressGui".equals(className)) {
@@ -182,9 +184,9 @@ public class MC145102FixTransformer implements ClassFileTransformer {
      * overlay, {@code l2} = the lambda nested inside l1 that the initial screen code is moved into
      * (null when the code goes directly into l1 as in 1.14).
      */
-    static Target targetFor(String mcVersion) {
+    static Target targetFor(String mcVersion, boolean isForge) {
         if (mcVersion.startsWith("1.14")) {
-            return new Target("net/minecraft/class_442", "method_18504", "()V", null, null);
+            return new Target(isForge ? "net/minecraft/client/gui/screen/MainMenuScreen" : "net/minecraft/class_442", isForge ? "lambda$init$3" : "method_18504", "()V", null, null);
         } else if (mcVersion.startsWith("1.15")) {
             return new Target("net/minecraft/class_442", "method_24040", "(Ljava/util/List;Ljava/util/Optional;)V", "method_24227", "(Ljava/util/List;)V");
         } else if (mcVersion.startsWith("1.16") || mcVersion.startsWith("1.17") || mcVersion.startsWith("1.18") || mcVersion.startsWith("1.19")) {
