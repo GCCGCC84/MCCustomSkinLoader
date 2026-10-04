@@ -1,3 +1,1 @@
 onboardAccessibility:false
-overrideHeight:768
-overrideWidth:1366
