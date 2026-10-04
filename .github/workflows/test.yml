@@ -95,6 +95,7 @@ jobs:
           ALSOFT_DRIVERS: 'null'
           GALLIUM_DRIVER: llvmpipe
           LIBGL_ALWAYS_SOFTWARE: 1
+          LP_NUM_THREADS: 0
         run: ./.github/scripts/Run-TestJob.ps1 -MinecraftVersion '${{ matrix.version }}' -Clients '${{ steps.setup.outputs.clients }}'
 
       - name: Upload diagnostics
