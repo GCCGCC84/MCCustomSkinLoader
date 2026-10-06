@@ -1,16 +1,20 @@
+# 1. downloads and runs the mod loader installers (fabric / quilt / forge / neoforge)
+# 2. resolves the "inheritsFrom" chain of every installed version JSON
+# 3. downloads client, server, library, native, logging and asset artifacts
+# 4. emits one self-contained launch script (client/versions/<id>.ps1) per installed client
+
 param(
-    [Parameter(Mandatory = $true)][string]$MinecraftVersion,
-    [Parameter(Mandatory = $true)][string]$MinecraftJsonUrl,
+    [Parameter(Mandatory)][string]$MinecraftVersion,
+    [Parameter(Mandatory)][string]$MinecraftJsonUrl,
     [string]$MinecraftJsonSha1 = "",
-    [string]$InstallersJson = $env:INSTALLERS,
-    [string]$RunDir = "Test/run"
+    [string]$InstallersJson = $env:INSTALLERS
 )
 
 $ErrorActionPreference = "Stop"
-$ProgressPreference = "SilentlyContinue"
+$ProgressPreference = "SilentlyContinue"    # dropping the download progress bar speeds things up a lot
+$ThrottleLimit = 32                         # max concurrent download workers
 
-$ThrottleLimit = 32
-
+# ---- environment ----
 $ServerAddress = "127.0.0.1"
 $ServerPort = 25565
 $WorkingDirectory = (Get-Location).Path
@@ -20,21 +24,21 @@ $InstallerJava = Join-Path $env:JAVA_HOME_25_X64 "bin/java.exe"
 $ExternalArgs = Import-PowerShellDataFile -LiteralPath (Join-Path $PSScriptRoot "ExternalArgs.psd1")
 
 $OsName = "windows"
-$OsArch = if ([Environment]::Is64BitOperatingSystem) { "x86_64" } else { "x86" }
+$OsArch = "x86_64"
 $OsVersion = [System.Environment]::OSVersion.Version
-$NativeArch = if ([Environment]::Is64BitOperatingSystem) { "64" } else { "32" }
+$NativeArch = "64"
+# Feature flags the version JSON "rules" are evaluated against (see Test-Rules).
 $Features = @{
-    is_demo_user                 = $false
-    has_custom_resolution        = $false
-    has_quick_plays_support      = $false
-    is_quick_play_singleplayer   = $false
-    is_quick_play_multiplayer    = $true
-    is_quick_play_realms         = $false
+    is_demo_user               = $false
+    has_custom_resolution      = $false
+    has_quick_plays_support    = $false
+    is_quick_play_singleplayer = $false
+    is_quick_play_multiplayer  = $true
+    is_quick_play_realms       = $false
 }
 
-if (-not [System.IO.Path]::IsPathRooted($RunDir)) {
-    $RunDir = Join-Path $WorkingDirectory $RunDir
-}
+# ----- paths -----
+$RunDir = Join-Path $WorkingDirectory "Test/run"
 $ClientDir = Join-Path $RunDir "client"
 $ServerDir = Join-Path $RunDir "server"
 $VersionsDir = Join-Path $ClientDir "versions"
@@ -44,33 +48,35 @@ $AssetIndexesDir = Join-Path $AssetsDir "indexes"
 $AssetObjectsDir = Join-Path $AssetsDir "objects"
 $LogConfigsDir = Join-Path $AssetsDir "log_configs"
 
-function Invoke-Downloads {
-    param(
-        [object[]]$Downloads,
-        [bool]$WarnOnFailure = $false
-    )
+# --- small helpers ---
+# Timestamped progress line, so every step is easy to spot in the CI log.
+function Write-Step { param([string]$Message) Write-Host "[$(Get-Date -Format s)] $Message" }
 
-    if (-not $Downloads -or $Downloads.Count -eq 0) { return }
+# Terse factory for the {Url,Path,Sha1} records consumed by Invoke-Downloads.
+function New-Dl { param([string]$Url, [string]$Path, [string]$Sha1 = "") [pscustomobject]@{ Url = $Url; Path = $Path; Sha1 = $Sha1 } }
+
+# SHA-1 verified, parallel, retrying downloader. Files whose hash already matches are
+# skipped; everything else is fetched as "<path>.download" and only moved into place
+# after verification. 5 attempts with linear back-off, -WarnOnFailure turns the final
+# failure into a warning instead of an error (used for the best-effort asset objects).
+function Invoke-Downloads {
+    param([object[]]$Downloads, [bool]$WarnOnFailure = $false)
+    if (-not $Downloads) { return }
     $Downloads | ForEach-Object -Parallel {
         $url = [string]$_.Url
-        $path = [string]$_.Path
-        $expectedSha1 = ""
-        if ($_.Sha1) { $expectedSha1 = ([string]$_.Sha1).ToUpperInvariant() }
         if (-not $url) { return }
+        $path = [string]$_.Path
+        $expectedSha1 = if ($_.Sha1) { ([string]$_.Sha1).ToUpperInvariant() } else { "" }
         $isValid = {
             param([string]$File)
             if (-not (Test-Path -LiteralPath $File -PathType Leaf)) { return $false }
             if ((Get-Item -LiteralPath $File -Force).Length -le 0) { return $false }
-            if ($expectedSha1 -and (Get-FileHash -LiteralPath $File -Algorithm SHA1).Hash -ne $expectedSha1) {
-                return $false
-            }
+            if ($expectedSha1 -and (Get-FileHash -LiteralPath $File -Algorithm SHA1).Hash -ne $expectedSha1) { return $false }
             return $true
         }
-        if (& $isValid $path) { return }
+        if (& $isValid $path) { return }    # already cached and verified
         $directory = Split-Path -Parent $path
-        if ($directory -and -not (Test-Path -LiteralPath $directory)) {
-            New-Item -ItemType Directory -Force -Path $directory | Out-Null
-        }
+        if ($directory -and -not (Test-Path -LiteralPath $directory)) { New-Item -ItemType Directory -Force -Path $directory | Out-Null }
         $temp = "$path.download"
         for ($attempt = 1; $attempt -le 5; $attempt++) {
             try {
@@ -82,10 +88,7 @@ function Invoke-Downloads {
             } catch {
                 if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
                 if ($attempt -ge 5) {
-                    if ($using:WarnOnFailure) {
-                        Write-Warning "Failed to download $url : $($_.Exception.Message)"
-                        return
-                    }
+                    if ($using:WarnOnFailure) { Write-Warning "Failed to download $url : $($_.Exception.Message)"; return }
                     throw "Failed to download $url : $($_.Exception.Message)"
                 }
                 Start-Sleep -Seconds ($attempt * 2)
@@ -94,139 +97,126 @@ function Invoke-Downloads {
     } -ThrottleLimit $ThrottleLimit
 }
 
+# Evaluates a Mojang launcher "rules" array against this host. Rules are applied in
+# order and the LAST matching rule decides, so an unmatched rule keeps the previous
+# verdict. No rules at all means "allowed".
 function Test-Rules {
     param($Rules)
     if (-not $Rules) { return $true }
-    $ruleList = @($Rules)
-    if ($ruleList.Count -eq 0) { return $true }
     $allowed = $false
-    foreach ($rule in $ruleList) {
+    foreach ($rule in @($Rules)) {
         $matched = $true
         if ($rule.os) {
-            if ($rule.os.name -and ([string]$rule.os.name -ne $OsName)) { $matched = $false }
-            if ($matched -and $rule.os.arch) {
-                $arch = [string]$rule.os.arch
-                if ($arch -eq "x86" -and $OsArch -eq "x86_64") { $matched = $false }
-                if ($arch -eq "x86_64" -and $OsArch -ne "x86_64") { $matched = $false }
-                if ($arch -eq "arm64" -and $OsArch -ne "arm64") { $matched = $false }
-            }
-            if ($matched -and $rule.os.version -and ([string]$OsVersion -notmatch [string]$rule.os.version)) { $matched = $false }
+            if ($rule.os.name -and [string]$rule.os.name -ne $OsName) { $matched = $false }
+            if ($rule.os.arch -and [string]$rule.os.arch -ne $OsArch) { $matched = $false }
+            if ($matched -and $rule.os.version -and [string]$OsVersion -notmatch [string]$rule.os.version) { $matched = $false }
             if ($matched -and $rule.os.versionRange) {
-                if ($rule.os.versionRange.min -and $OsVersion -lt [version]([string]$rule.os.versionRange.min)) { $matched = $false }
-                if ($rule.os.versionRange.max -and $OsVersion -gt [version]([string]$rule.os.versionRange.max)) { $matched = $false }
+                if ($rule.os.versionRange.min -and $OsVersion -lt [version][string]$rule.os.versionRange.min) { $matched = $false }
+                if ($rule.os.versionRange.max -and $OsVersion -gt [version][string]$rule.os.versionRange.max) { $matched = $false }
             }
         }
         if ($matched -and $rule.features) {
             foreach ($feature in $rule.features.PSObject.Properties) {
-                if ($Features[$feature.Name] -ne $feature.Value) {
-                    $matched = $false
-                    break
-                }
+                if ($Features[$feature.Name] -ne $feature.Value) { $matched = $false; break }
             }
         }
-        if ($matched) { $allowed = ([string]$rule.action -eq "allow") }
+        if ($matched) { $allowed = [string]$rule.action -eq "allow" }
     }
     return $allowed
 }
 
+# Maven base URL of a library: explicit "url", else a well known repo derived from the
+# group id, else the vanilla libraries host. Always returned with a trailing slash.
 function Get-LibraryBaseUrl {
     param($Library, [string[]]$Parts)
-    $url = ""
-    if ($Library.url) { $url = [string]$Library.url }
-    if (-not $url) {
-        if ($Parts[0] -eq "net.minecraftforge") { $url = "https://maven.minecraftforge.net/" }
-        elseif ($Parts[0] -eq "net.neoforged") { $url = "https://maven.neoforged.net/releases/" }
-        else { $url = "https://libraries.minecraft.net/" }
-    }
+    $url = if ($Library.url) { [string]$Library.url }
+    elseif ($Parts[0] -eq "net.minecraftforge") { "https://maven.minecraftforge.net/" }
+    elseif ($Parts[0] -eq "net.neoforged") { "https://maven.neoforged.net/releases/" }
+    else { "https://libraries.minecraft.net/" }
     if (-not $url.EndsWith("/")) { $url += "/" }
     return $url
 }
 
+# Maven-relative path (group/artifact/version/file.jar) of a "group:artifact:version[:classifier]" name.
 function Get-LibraryDerivedPath {
     param([string[]]$Parts)
-    $group = $Parts[0]
-    $artifactName = $Parts[1]
-    $version = $Parts[2]
-    $fileName = "$artifactName-$version"
-    if ($Parts.Count -ge 4 -and $Parts[3]) { $fileName += "-$($Parts[3])" }
-    $fileName += ".jar"
-    return "$($group -replace '\.', '/')/$artifactName/$version/$fileName"
+    $suffix = if ($Parts.Count -ge 4 -and $Parts[3]) { "-$($Parts[3])" } else { "" }
+    return "$($Parts[0] -replace '\.', '/')/$($Parts[1])/$($Parts[2])/$($Parts[1])-$($Parts[2])$suffix.jar"
 }
 
+# Normalizes an artifact (or natives classifier) node into {Path,Url,Sha1}. When the JSON
+# has no such node the path is derived from the name instead of leaving it unresolved.
+function New-ArtifactRecord {
+    param($Library, [string[]]$Parts, $Artifact, [string]$Classifier)
+    if ($Artifact -and $Artifact.path) {
+        $url = if ($Artifact.url) { [string]$Artifact.url } else { (Get-LibraryBaseUrl $Library $Parts) + [string]$Artifact.path }
+        return [pscustomobject]@{ Path = [string]$Artifact.path; Url = $url; Sha1 = [string]$Artifact.sha1 }
+    }
+    $childParts = if ($Classifier) { @($Parts[0], $Parts[1], $Parts[2], $Classifier) } else { $Parts }
+    $path = Get-LibraryDerivedPath $childParts
+    return [pscustomobject]@{ Path = $path; Url = ((Get-LibraryBaseUrl $Library $Parts) + $path); Sha1 = "" }
+}
+
+# Main artifact of a library, or $null for libraries that declare a "downloads" block but
+# no artifact (those are provided by a mod loader instead) or have a malformed name.
 function Get-LibraryArtifact {
     param($Library)
     $parts = @([string]$Library.name -split ":")
     if ($parts.Count -lt 3) { return $null }
-    $artifact = $Library.downloads.artifact
-    if ($artifact -and $artifact.path) {
-        $url = [string]$artifact.url
-        if (-not $url) { $url = (Get-LibraryBaseUrl $Library $parts) + [string]$artifact.path }
-        return [pscustomobject]@{
-            Path = [string]$artifact.path
-            Url  = $url
-            Sha1 = [string]$artifact.sha1
-        }
-    }
+    if ($Library.downloads.artifact -and $Library.downloads.artifact.path) { return New-ArtifactRecord $Library $parts $Library.downloads.artifact "" }
     if ($Library.downloads) { return $null }
-    $path = Get-LibraryDerivedPath $parts
-    return [pscustomobject]@{ Path = $path; Url = ((Get-LibraryBaseUrl $Library $parts) + $path); Sha1 = "" }
+    return New-ArtifactRecord $Library $parts $null ""
 }
 
+# Quotes a value for embedding into a generated .ps1. Launcher placeholders such as
+# ${classpath} contain '$', so those values need double quotes with backtick escaping;
+# everything else is cheaper and safer as a single quoted literal.
 function ConvertTo-PowerShellLiteral {
     param([string]$Value)
-    if ($Value.Contains('${')) {
-        $backtick = [string][char]96
-        $escaped = $Value.Replace($backtick, $backtick + $backtick).Replace('"', $backtick + '"')
-        return '"' + $escaped + '"'
-    }
-    return "'" + $Value.Replace("'", "''") + "'"
+    if (-not $Value.Contains('${')) { return "'" + $Value.Replace("'", "''") + "'" }
+    $bt = [string][char]96
+    return '"' + $Value.Replace($bt, $bt + $bt).Replace('"', $bt + '"') + '"'
 }
 
+# Expands a version JSON argument array: plain strings pass through, rule gated entries are
+# kept only when their rules match, and array values are flattened into the result.
 function Expand-ArgumentList {
     param($Arguments)
     $result = @()
     foreach ($entry in @($Arguments)) {
-        if ($entry -is [string]) {
-            $result += $entry
-            continue
-        }
-        if ($null -eq $entry.value) { continue }
-        if (-not (Test-Rules $entry.rules)) { continue }
-        if ($entry.value -is [System.Array]) {
-            $result += @($entry.value)
-        } else {
-            $result += [string]$entry.value
-        }
+        if ($entry -is [string]) { $result += $entry; continue }
+        if ($null -eq $entry.value -or -not (Test-Rules $entry.rules)) { continue }
+        $result += if ($entry.value -is [System.Array]) { @($entry.value) } else { [string]$entry.value }
     }
     return $result
 }
 
+# Merges a parent version object into its child: missing properties are inherited, arrays
+# (libraries, arguments) are appended child first, and "arguments" is merged recursively
+# because it is an object holding two arrays.
 function Merge-VersionObject {
     param($Child, $Parent)
     foreach ($property in $Parent.PSObject.Properties) {
         $name = $property.Name
         $childProperty = $Child.PSObject.Properties[$name]
-        if ($null -eq $childProperty) {
-            $Child | Add-Member -MemberType NoteProperty -Name $name -Value $property.Value
-            continue
-        }
+        if ($null -eq $childProperty) { $Child | Add-Member -MemberType NoteProperty -Name $name -Value $property.Value; continue }
         $childValue = $childProperty.Value
-        $parentValue = $property.Value
-        if ($childValue -is [System.Array]) {
-            $Child.$name = @($childValue) + @($parentValue)
-        } elseif ($name -eq "arguments" -and $childValue -is [System.Management.Automation.PSCustomObject] -and $parentValue -is [System.Management.Automation.PSCustomObject]) {
-            Merge-VersionObject -Child $childValue -Parent $parentValue
+        if ($childValue -is [System.Array]) { $Child.$name = @($childValue) + @($property.Value) }
+        elseif ($name -eq "arguments" -and $childValue -is [System.Management.Automation.PSCustomObject] -and $property.Value -is [System.Management.Automation.PSCustomObject]) {
+            Merge-VersionObject -Child $childValue -Parent $property.Value
         }
     }
 }
 
+# Depth-first resolution of "inheritsFrom": the parent is merged first, the result is cached
+# in $mergedObjects, and $resolving turns a cyclic inheritance into a clear error.
 function Resolve-VersionObject {
     param([string]$Id)
     if ($mergedObjects.Contains($Id)) { return $mergedObjects[$Id] }
     if (-not $versionObjects.Contains($Id)) { throw "Missing parent version JSON: $Id" }
     if (-not $resolving.Add($Id)) { throw "Circular inheritsFrom detected at: $Id" }
     $versionObject = $versionObjects[$Id]
-    if ($versionObject.PSObject.Properties["inheritsFrom"] -and $versionObject.inheritsFrom) {
+    if ($versionObject.inheritsFrom) {
         $parent = Resolve-VersionObject -Id ([string]$versionObject.inheritsFrom)
         Merge-VersionObject -Child $versionObject -Parent $parent
     }
@@ -235,79 +225,108 @@ function Resolve-VersionObject {
     return $versionObject
 }
 
+# Template of the generated launcher. Tokens (@@NAME@@) are replaced per version; the here
+# string is single quoted so the '$' of the generated PowerShell stays literal.
+$LaunchTemplate = @'
+$ErrorActionPreference = "Stop"
+
+$version_name = @@VERSION_NAME@@
+$game_directory = $PSScriptRoot
+$assets_root = Join-Path $PSScriptRoot "assets"
+$assets_index_name = @@ASSETS_INDEX@@
+$quickPlayMultiplayer = @@QUICK_PLAY@@
+$auth_player_name = "Player"
+$auth_uuid = "00000000-0000-0000-0000-000000000000"
+$auth_access_token = "0"
+$clientid = "0"
+$auth_xuid = "0"
+$user_properties = "{}"
+$user_type = "legacy"
+$version_type = "release"
+$launcher_name = "CustomSkinLoader"
+$launcher_version = @@LAUNCHER_VERSION@@
+$library_directory = Join-Path $PSScriptRoot "libraries"
+$classpath_separator = [System.IO.Path]::PathSeparator
+$primary_jar = Join-Path $PSScriptRoot @@PRIMARY_JAR@@
+$natives_directory = Join-Path $PSScriptRoot @@NATIVES_DIR@@
+@@LOGGING_CONFIG_LINE@@
+$classpath = @(
+@@CLASSPATH_ENTRIES@@
+    $primary_jar
+) -join $classpath_separator
+$java = "java"
+$mainClass = @@MAIN_CLASS@@
+$jvmArgs = @(
+@@JVM_ARGUMENTS@@)
+$gameArgs = @(
+@@GAME_ARGUMENTS@@)
+
+& $java @jvmArgs $mainClass @gameArgs
+exit $LASTEXITCODE
+'@
+
+# ======= main =======
 foreach ($directory in @($RunDir, $ClientDir, $ServerDir, $VersionsDir, $LibrariesDir, $AssetIndexesDir, $AssetObjectsDir, $LogConfigsDir, $InstallerLogsDir)) {
     New-Item -ItemType Directory -Force -Path $directory | Out-Null
 }
 
-$info = Get-Content -LiteralPath "build.info.json" -Raw | ConvertFrom-Json
-$modVersion = [string]$info.mod_version
+$modVersion = [string](Get-Content -LiteralPath "build.info.json" -Raw | ConvertFrom-Json).mod_version
 
-Write-Host "[$(Get-Date -Format s)] Downloading version JSON"
-$versionJsonPath = Join-Path (Join-Path $VersionsDir $MinecraftVersion) "$MinecraftVersion.json"
-Invoke-Downloads -Downloads @([pscustomobject]@{
-    Url  = $MinecraftJsonUrl
-    Path = $versionJsonPath
-    Sha1 = $MinecraftJsonSha1
-})
+Write-Step "Downloading version JSON"
+$versionJsonPath = Join-Path $VersionsDir $MinecraftVersion "$MinecraftVersion.json"
+Invoke-Downloads -Downloads (New-Dl $MinecraftJsonUrl $versionJsonPath $MinecraftJsonSha1)
 $versionJson = Get-Content -LiteralPath $versionJsonPath -Raw | ConvertFrom-Json
-$javaMajor = 8
-if ($versionJson.javaVersion -and $versionJson.javaVersion.majorVersion) {
-    $javaMajor = [int]$versionJson.javaVersion.majorVersion
-}
+# Java 8 is the floor: "javaVersion" does not exist in older (pre-1.17) version JSONs.
+$javaMajor = if ($versionJson.javaVersion.majorVersion) { [int]$versionJson.javaVersion.majorVersion } else { 8 }
 
+# --- mod loader installers ---
 $installers = @($InstallersJson | ConvertFrom-Json)
-$clients = New-Object System.Collections.Generic.List[string]
-$clientLoaders = @{}
+$clients = New-Object System.Collections.Generic.List[string]   # generated launch scripts
+$clientLoaders = @{}                                            # version id -> loader name
 
-$installerDownloads = @()
-foreach ($installer in $installers) {
-    $installerDownloads += [pscustomobject]@{
-        Url  = [string]$installer.url
-        Path = Join-Path $RunDir "$($installer.name)-$($installer.version)-installer.jar"
-    }
-}
-Write-Host "[$(Get-Date -Format s)] Downloading $($installerDownloads.Count) installer(s)"
+$installerDownloads = @($installers | ForEach-Object { New-Dl ([string]$_.url) (Join-Path $RunDir "$($_.name)-$($_.version)-installer.jar") })
+Write-Step "Downloading $($installerDownloads.Count) installer(s)"
 Invoke-Downloads -Downloads $installerDownloads
 
-Write-Host "[$(Get-Date -Format s)] Installing mod loaders with $InstallerJava"
-# The Forge 1.14.3 installer performs the DEOBF_REALMS post-processing step (net.minecraftforge.installertools.DeobfRealms),
-# and when it downloads libraries/com/mojang/realms/1.14.17/realms-1.14.17.jar, it does not create the parent directory,
-# so installing in an empty directory throws NoSuchFileException, causing "Failed to download realms jar".
-# In the current matrix, only the 1.14.3 Forge installer has this processor, so the directory is created in advance here.
+Write-Step "Installing mod loaders with $InstallerJava"
+# The Forge 1.14.3 installer performs the DEOBF_REALMS post-processing step
+# (net.minecraftforge.installertools.DeobfRealms), and when it downloads
+# libraries/com/mojang/realms/1.14.17/realms-1.14.17.jar it does not create the parent
+# directory, so installing in an empty directory throws NoSuchFileException, causing
+# "Failed to download realms jar". Only the 1.14.3 Forge installer has this processor in
+# the current matrix, so the directory is created in advance here.
 New-Item -ItemType Directory -Force -Path (Join-Path $LibrariesDir "com/mojang/realms/1.14.17") | Out-Null
+
 foreach ($installer in $installers) {
     $loader = [string]$installer.name
     $installerPath = Join-Path $RunDir "$loader-$($installer.version)-installer.jar"
     $installerLog = Join-Path $InstallerLogsDir "$loader-$MinecraftVersion.log"
     "[$(Get-Date -Format s)] $loader $MinecraftVersion" | Out-File -FilePath $installerLog -Encoding utf8
-    Write-Host "[$(Get-Date -Format s)] [$loader] installing for $MinecraftVersion"
+    Write-Step "[$loader] installing for $MinecraftVersion"
     $versionsBefore = @(Get-ChildItem -LiteralPath $VersionsDir -Directory | Select-Object -ExpandProperty Name)
-    switch ($loader) {
-        "fabric" { & $InstallerJava -jar $installerPath client -dir $ClientDir -mcversion $MinecraftVersion 2>&1 | Out-File -FilePath $installerLog -Encoding utf8 -Append }
-        "quilt" { & $InstallerJava -jar $installerPath install client $MinecraftVersion "--install-dir=$ClientDir" 2>&1 | Out-File -FilePath $installerLog -Encoding utf8 -Append }
-        "forge" { & $InstallerJava -cp "$installerPath;$TestJarPath" customskinloader.test.installer.Main --installClient $ClientDir 2>&1 | Out-File -FilePath $installerLog -Encoding utf8 -Append }
-        "neoforge" { & $InstallerJava -jar $installerPath --installClient $ClientDir 2>&1 | Out-File -FilePath $installerLog -Encoding utf8 -Append }
-        default { throw "Unknown loader: $loader" }
+    # Every loader has its own CLI flavour; forge additionally goes through the test jar.
+    $arguments = switch ($loader) {
+        "fabric" { @("-jar", $installerPath, "client", "-dir", $ClientDir, "-mcversion", $MinecraftVersion) }
+        "quilt" { @("-jar", $installerPath, "install", "client", $MinecraftVersion, "--install-dir=$ClientDir") }
+        "forge" { @("-cp", "$installerPath;$TestJarPath", "customskinloader.test.installer.Main", "--installClient", $ClientDir) }
+        "neoforge" { @("-jar", $installerPath, "--installClient", $ClientDir) }
     }
+    & $InstallerJava @arguments 2>&1 | Out-File -FilePath $installerLog -Encoding utf8 -Append
     "ExitCode: $LASTEXITCODE" | Out-File -FilePath $installerLog -Encoding utf8 -Append
-    $installerSelfLog = Join-Path $WorkingDirectory "$(Split-Path -Leaf $installerPath).log"
-    if (Test-Path -LiteralPath $installerSelfLog) {
-        Move-Item -LiteralPath $installerSelfLog -Destination (Join-Path $InstallerLogsDir "$loader-$MinecraftVersion-installer.log") -Force
-    }
-    if ($LASTEXITCODE -ne 0) {
-        throw "[$loader] failed to install for $MinecraftVersion (exit code $LASTEXITCODE)"
-    }
+    # The forge test jar drops its own log into the current directory; archive it too.
+    $selfLog = Join-Path $WorkingDirectory "$(Split-Path -Leaf $installerPath).log"
+    if (Test-Path -LiteralPath $selfLog) { Move-Item -LiteralPath $selfLog -Destination (Join-Path $InstallerLogsDir "$loader-$MinecraftVersion-installer.log") -Force }
+    if ($LASTEXITCODE -ne 0) { throw "[$loader] failed to install for $MinecraftVersion (exit code $LASTEXITCODE)" }
+    # The installer has to produce exactly one new version folder, that is the client id.
     $newVersions = @(Get-ChildItem -LiteralPath $VersionsDir -Directory | Where-Object { $versionsBefore -notcontains $_.Name })
-    if ($newVersions.Count -ne 1) {
-        throw "[$loader] expected one installed version for $MinecraftVersion, got $($newVersions.Count)"
-    }
+    if ($newVersions.Count -ne 1) { throw "[$loader] expected one installed version for $MinecraftVersion, got $($newVersions.Count)" }
     [void]$clients.Add("$($newVersions[0].Name).ps1")
     $clientLoaders[[string]$newVersions[0].Name] = $loader
 }
 
-Write-Host "[$(Get-Date -Format s)] Resolving inheritsFrom"
+Write-Step "Resolving inheritsFrom"
 $versionObjects = [ordered]@{}
-foreach ($directory in (Get-ChildItem -LiteralPath $VersionsDir -Directory)) {
+foreach ($directory in Get-ChildItem -LiteralPath $VersionsDir -Directory) {
     $jsonPath = Join-Path $directory.FullName "$($directory.Name).json"
     if (-not (Test-Path -LiteralPath $jsonPath)) { continue }
     $versionObject = Get-Content -LiteralPath $jsonPath -Raw | ConvertFrom-Json
@@ -318,36 +337,30 @@ $resolving = New-Object System.Collections.Generic.HashSet[string]
 foreach ($id in @($versionObjects.Keys)) { [void](Resolve-VersionObject -Id $id) }
 $allVersions = @($mergedObjects.Values)
 
-Write-Host "[$(Get-Date -Format s)] Downloading client jars"
+# Client jars live next to their version JSON; server jars only exist on root versions.
+Write-Step "Downloading client jars"
 $clientDownloads = [ordered]@{}
+$serverDownloads = [ordered]@{}
 foreach ($versionObject in $allVersions) {
+    $id = [string]$versionObject.id
     $client = $versionObject.downloads.client
-    if (-not $client -or -not $client.url) { continue }
-    $destination = Join-Path (Join-Path $VersionsDir ([string]$versionObject.id)) "$($versionObject.id).jar"
-    $clientDownloads[$destination] = [pscustomobject]@{
-        Url  = [string]$client.url
-        Path = $destination
-        Sha1 = [string]$client.sha1
+    if ($client.url) {
+        $destination = Join-Path $VersionsDir $id "$id.jar"
+        $clientDownloads[$destination] = New-Dl ([string]$client.url) $destination ([string]$client.sha1)
+    }
+    if ($versionObject.inheritsFrom) { continue }
+    $server = $versionObject.downloads.server
+    if ($server.url) {
+        $destination = Join-Path $ServerDir "$id.jar"
+        $serverDownloads[$destination] = New-Dl ([string]$server.url) $destination ([string]$server.sha1)
     }
 }
 Invoke-Downloads -Downloads @($clientDownloads.Values)
 
-Write-Host "[$(Get-Date -Format s)] Downloading server jars"
-$serverDownloads = [ordered]@{}
-foreach ($versionObject in $allVersions) {
-    if ($versionObject.PSObject.Properties["inheritsFrom"] -and $versionObject.inheritsFrom) { continue }
-    $server = $versionObject.downloads.server
-    if (-not $server -or -not $server.url) { continue }
-    $destination = Join-Path $ServerDir "$($versionObject.id).jar"
-    $serverDownloads[$destination] = [pscustomobject]@{
-        Url  = [string]$server.url
-        Path = $destination
-        Sha1 = [string]$server.sha1
-    }
-}
+Write-Step "Downloading server jars"
 Invoke-Downloads -Downloads @($serverDownloads.Values)
 
-Write-Host "[$(Get-Date -Format s)] Downloading libraries"
+Write-Step "Downloading libraries"
 $libraryDownloads = [ordered]@{}
 $nativeJarsByVersion = [ordered]@{}
 foreach ($versionObject in $allVersions) {
@@ -358,64 +371,39 @@ foreach ($versionObject in $allVersions) {
         $artifact = Get-LibraryArtifact $library
         if ($artifact) {
             $destination = Join-Path $LibrariesDir $artifact.Path
-            $libraryDownloads[$destination] = [pscustomobject]@{
-                Url  = $artifact.Url
-                Path = $destination
-                Sha1 = $artifact.Sha1
-            }
+            $libraryDownloads[$destination] = New-Dl $artifact.Url $destination $artifact.Sha1
         }
-        if ($library.natives -and $library.natives.windows) {
-            $parts = @([string]$library.name -split ":")
-            $classifier = ([string]$library.natives.windows).Replace('${arch}', $NativeArch)
-            $download = $library.downloads.classifiers.$classifier
-            $native = $null
-            if ($download -and $download.path) {
-                $url = [string]$download.url
-                if (-not $url) { $url = (Get-LibraryBaseUrl $library $parts) + [string]$download.path }
-                $native = [pscustomobject]@{
-                    Path = [string]$download.path
-                    Url  = $url
-                    Sha1 = [string]$download.sha1
-                }
-            } else {
-                $nativeParts = @($parts[0], $parts[1], $parts[2], $classifier)
-                $path = Get-LibraryDerivedPath $nativeParts
-                $native = [pscustomobject]@{ Path = $path; Url = ((Get-LibraryBaseUrl $library $parts) + $path); Sha1 = "" }
-            }
-            $destination = Join-Path $LibrariesDir $native.Path
-            $libraryDownloads[$destination] = [pscustomobject]@{
-                Url  = $native.Url
-                Path = $destination
-                Sha1 = $native.Sha1
-            }
-            $nativeJars[$native.Path] = @($library.extract.exclude)
-        }
+        if (-not $library.natives.windows) { continue }
+        # The natives mapping is a classifier; "${arch}" expands to 64 for this host.
+        $classifier = ([string]$library.natives.windows).Replace('${arch}', $NativeArch)
+        $parts = @([string]$library.name -split ":")
+        $native = New-ArtifactRecord $library $parts $library.downloads.classifiers.$classifier $classifier
+        $destination = Join-Path $LibrariesDir $native.Path
+        $libraryDownloads[$destination] = New-Dl $native.Url $destination $native.Sha1
+        $nativeJars[$native.Path] = @($library.extract.exclude)
     }
     if ($nativeJars.Count -gt 0) { $nativeJarsByVersion[$versionId] = $nativeJars }
 }
 Invoke-Downloads -Downloads @($libraryDownloads.Values)
 
-Write-Host "[$(Get-Date -Format s)] Extracting natives"
+Write-Step "Extracting natives"
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 foreach ($versionId in $nativeJarsByVersion.Keys) {
-    $destination = Join-Path (Join-Path $VersionsDir $versionId) "natives"
+    $destination = Join-Path $VersionsDir $versionId "natives"
     foreach ($nativePath in $nativeJarsByVersion[$versionId].Keys) {
         $excludeList = @($nativeJarsByVersion[$versionId][$nativePath])
         $archive = [System.IO.Compression.ZipFile]::OpenRead((Join-Path $LibrariesDir $nativePath))
         try {
             foreach ($entry in $archive.Entries) {
-                if ($entry.FullName.EndsWith("/")) { continue }
+                if ($entry.FullName.EndsWith("/")) { continue }    # directory entry
                 $excluded = $false
-                foreach ($prefix in $excludeList) {
-                    if ($prefix -and $entry.FullName.StartsWith([string]$prefix)) { $excluded = $true; break }
-                }
+                foreach ($prefix in $excludeList) { if ($prefix -and $entry.FullName.StartsWith([string]$prefix)) { $excluded = $true; break } }
                 if ($excluded) { continue }
+                # Zip entries always use '/', the local file system may not.
                 $target = Join-Path $destination ($entry.FullName -replace "/", [System.IO.Path]::DirectorySeparatorChar)
                 if (Test-Path -LiteralPath $target) { continue }
                 $targetDirectory = Split-Path -Parent $target
-                if ($targetDirectory -and -not (Test-Path -LiteralPath $targetDirectory)) {
-                    New-Item -ItemType Directory -Force -Path $targetDirectory | Out-Null
-                }
+                if ($targetDirectory -and -not (Test-Path -LiteralPath $targetDirectory)) { New-Item -ItemType Directory -Force -Path $targetDirectory | Out-Null }
                 [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
             }
         } finally {
@@ -424,59 +412,45 @@ foreach ($versionId in $nativeJarsByVersion.Keys) {
     }
 }
 
-Write-Host "[$(Get-Date -Format s)] Downloading logging configs"
+Write-Step "Downloading logging configs"
 $loggingDownloads = [ordered]@{}
 foreach ($versionObject in $allVersions) {
-    $logging = $versionObject.logging
-    if (-not $logging -or -not $logging.client -or -not $logging.client.file) { continue }
-    $loggingFile = $logging.client.file
+    $loggingFile = $versionObject.logging.client.file
     if (-not $loggingFile.id -or -not $loggingFile.url) { continue }
     $destination = Join-Path $LogConfigsDir ([string]$loggingFile.id)
     if ($loggingDownloads.Contains($destination)) { continue }
-    $loggingDownloads[$destination] = [pscustomobject]@{
-        Url  = [string]$loggingFile.url
-        Path = $destination
-        Sha1 = [string]$loggingFile.sha1
-    }
+    $loggingDownloads[$destination] = New-Dl ([string]$loggingFile.url) $destination ([string]$loggingFile.sha1)
 }
 Invoke-Downloads -Downloads @($loggingDownloads.Values)
 
-Write-Host "[$(Get-Date -Format s)] Downloading asset indexes"
+Write-Step "Downloading asset indexes"
 $assetIndexDownloads = [ordered]@{}
 foreach ($versionObject in $allVersions) {
     $assetIndex = $versionObject.assetIndex
-    if (-not $assetIndex -or -not $assetIndex.id -or -not $assetIndex.url) { continue }
+    if (-not $assetIndex.id -or -not $assetIndex.url) { continue }
     $destination = Join-Path $AssetIndexesDir "$($assetIndex.id).json"
-    $assetIndexDownloads[$destination] = [pscustomobject]@{
-        Url  = [string]$assetIndex.url
-        Path = $destination
-        Sha1 = [string]$assetIndex.sha1
-    }
+    $assetIndexDownloads[$destination] = New-Dl ([string]$assetIndex.url) $destination ([string]$assetIndex.sha1)
 }
 Invoke-Downloads -Downloads @($assetIndexDownloads.Values)
 
-Write-Host "[$(Get-Date -Format s)] Downloading assets"
+Write-Step "Downloading assets"
+# Union of the object hashes of every asset index; the hash is also the expected SHA-1.
 $assetHashes = [ordered]@{}
-foreach ($indexFile in (Get-ChildItem -LiteralPath $AssetIndexesDir -Filter "*.json" -File)) {
+foreach ($indexFile in Get-ChildItem -LiteralPath $AssetIndexesDir -Filter "*.json" -File) {
     $assetIndex = Get-Content -LiteralPath $indexFile.FullName -Raw | ConvertFrom-Json
-    if (-not $assetIndex.objects) { continue }
     foreach ($property in $assetIndex.objects.PSObject.Properties) {
         $hash = [string]$property.Value.hash
         if ($hash -and -not $assetHashes.Contains($hash)) { $assetHashes[$hash] = $true }
     }
 }
-$assetDownloads = New-Object System.Collections.Generic.List[object]
-foreach ($hash in $assetHashes.Keys) {
-    $prefix = $hash.Substring(0, 2)
-    $assetDownloads.Add([pscustomobject]@{
-        Url  = "https://resources.download.minecraft.net/$prefix/$hash"
-        Path = Join-Path (Join-Path $AssetObjectsDir $prefix) $hash
-        Sha1 = $hash
-    })
+$assetDownloads = $assetHashes.Keys | ForEach-Object {
+    $prefix = $_.Substring(0, 2)
+    New-Dl "https://resources.download.minecraft.net/$prefix/$_" (Join-Path $AssetObjectsDir $prefix $_) $_
 }
-Invoke-Downloads -Downloads $assetDownloads.ToArray() -WarnOnFailure $true
+Invoke-Downloads -Downloads @($assetDownloads) -WarnOnFailure $true
 
-Write-Host "[$(Get-Date -Format s)] Generating launch scripts"
+Write-Step "Generating launch scripts"
+# JVM arguments used by legacy (pre-1.13) version JSONs; ${...} are launcher placeholders.
 $legacyJvmArguments = @(
     "-Dos.name=Windows 10"
     "-Dos.version=10.0"
@@ -488,6 +462,7 @@ $legacyJvmArguments = @(
     "-cp"
     '${classpath}'
 )
+# Fallback user JVM arguments when the version JSON has no "default-user-jvm" block.
 $defaultUserJvmArguments = @(
     "-Xmx2G"
     "-XX:+UnlockExperimentalVMOptions"
@@ -501,6 +476,7 @@ foreach ($versionObject in $allVersions) {
     $versionId = [string]$versionObject.id
     $extraJvmArguments = @()
     $extraGameArguments = @()
+    # Extra arguments contributed by ExternalArgs.psd1 for this loader + game version.
     if ($clientLoaders.ContainsKey($versionId)) {
         $loader = [string]$clientLoaders[$versionId]
         $gameVersion = [version]$MinecraftVersion
@@ -509,8 +485,9 @@ foreach ($versionObject in $allVersions) {
             foreach ($rule in @($entry.Matrix)) {
                 if (@($rule.Loaders) -notcontains $loader) { continue }
                 $range = @($rule.VersionRange)
+                # VersionRange is a flat list of inclusive [min, max] pairs.
                 for ($index = 0; $index + 1 -lt $range.Count; $index += 2) {
-                    if ($gameVersion -ge [version]([string]$range[$index]) -and $gameVersion -le [version]([string]$range[$index + 1])) { $matched = $true; break }
+                    if ($gameVersion -ge [version][string]$range[$index] -and $gameVersion -le [version][string]$range[$index + 1]) { $matched = $true; break }
                 }
                 if ($matched) { break }
             }
@@ -521,24 +498,18 @@ foreach ($versionObject in $allVersions) {
     }
     if ($versionObject.arguments) {
         $jvmArguments = @(Expand-ArgumentList $versionObject.arguments.jvm)
-        if ($versionObject.arguments.'default-user-jvm') {
-            $jvmArguments += @(Expand-ArgumentList $versionObject.arguments.'default-user-jvm')
-        } else {
-            $jvmArguments += $defaultUserJvmArguments
-        }
+        $jvmArguments += if ($versionObject.arguments.'default-user-jvm') { @(Expand-ArgumentList $versionObject.arguments.'default-user-jvm') } else { $defaultUserJvmArguments }
         $gameArguments = @(Expand-ArgumentList $versionObject.arguments.game)
     } else {
         $jvmArguments = @($legacyJvmArguments) + $defaultUserJvmArguments
         $gameArguments = @([string]$versionObject.minecraftArguments -split "\s+" | Where-Object { $_ })
     }
-
-    if ($gameArguments -notcontains "--quickPlayMultiplayer") {
-        $gameArguments += @("--server", $ServerAddress, "--port", "$ServerPort")
-    }
+    # Quick play versions connect through their own argument, all others get --server/--port.
+    if ($gameArguments -notcontains "--quickPlayMultiplayer") { $gameArguments += @("--server", $ServerAddress, "--port", "$ServerPort") }
 
     $loggingConfigPath = ""
     $logging = $versionObject.logging
-    if ($logging -and $logging.client -and $logging.client.file -and $logging.client.file.id -and $logging.client.argument) {
+    if ($logging.client.file.id -and $logging.client.argument) {
         $loggingConfigPath = "assets/log_configs/$($logging.client.file.id)"
         $jvmArguments += ([string]$logging.client.argument).Replace('${path}', '${logging_config_path}')
     }
@@ -546,6 +517,8 @@ foreach ($versionObject in $allVersions) {
     $jvmArguments += $extraJvmArguments
     $gameArguments += $extraGameArguments
 
+    # Classpath of this version, de-duplicated by group:artifact[:classifier] so that only
+    # the newest variant of an artifact ends up on the command line.
     $classpathPaths = @()
     $seenLibraries = @{}
     foreach ($library in @($versionObject.libraries)) {
@@ -560,61 +533,33 @@ foreach ($versionObject in $allVersions) {
         if ($classpathArtifact) { $classpathPaths += $classpathArtifact.Path }
     }
 
-    $assetIndexId = ""
-    if ($versionObject.assetIndex -and $versionObject.assetIndex.id) { $assetIndexId = [string]$versionObject.assetIndex.id }
+    $assetIndexId = if ($versionObject.assetIndex.id) { [string]$versionObject.assetIndex.id } else { "" }
 
-    $lines = New-Object System.Collections.Generic.List[string]
-    $lines.Add('$ErrorActionPreference = "Stop"')
-    $lines.Add("")
-    $lines.Add('$version_name = ' + (ConvertTo-PowerShellLiteral $versionId))
-    $lines.Add('$game_directory = $PSScriptRoot')
-    $lines.Add('$assets_root = Join-Path $PSScriptRoot "assets"')
-    $lines.Add('$assets_index_name = ' + (ConvertTo-PowerShellLiteral $assetIndexId))
-    $lines.Add('$quickPlayMultiplayer = ' + (ConvertTo-PowerShellLiteral ($ServerAddress + ":" + $ServerPort)))
-    $lines.Add('$auth_player_name = "Player"')
-    $lines.Add('$auth_uuid = "00000000-0000-0000-0000-000000000000"')
-    $lines.Add('$auth_access_token = "0"')
-    $lines.Add('$clientid = "0"')
-    $lines.Add('$auth_xuid = "0"')
-    $lines.Add('$user_properties = "{}"')
-    $lines.Add('$user_type = "legacy"')
-    $lines.Add('$version_type = "release"')
-    $lines.Add('$launcher_name = "CustomSkinLoader"')
-    $lines.Add('$launcher_version = ' + (ConvertTo-PowerShellLiteral $modVersion))
-    $lines.Add('$library_directory = Join-Path $PSScriptRoot "libraries"')
-    $lines.Add('$classpath_separator = [System.IO.Path]::PathSeparator')
-    $lines.Add('$primary_jar = Join-Path $PSScriptRoot ' + (ConvertTo-PowerShellLiteral "versions/$versionId/$versionId.jar"))
-    $lines.Add('$natives_directory = Join-Path $PSScriptRoot ' + (ConvertTo-PowerShellLiteral "versions/$versionId/natives"))
-    if ($loggingConfigPath) {
-        $lines.Add('$logging_config_path = Join-Path $PSScriptRoot ' + (ConvertTo-PowerShellLiteral $loggingConfigPath))
+    # Render the template. Every value becomes a PowerShell literal so that entries such as
+    # '${classpath}' or '-Dos.name=Windows 10' survive the round trip into the script.
+    $tokens = [ordered]@{
+        VERSION_NAME        = (ConvertTo-PowerShellLiteral $versionId)
+        ASSETS_INDEX        = (ConvertTo-PowerShellLiteral $assetIndexId)
+        QUICK_PLAY          = (ConvertTo-PowerShellLiteral "${ServerAddress}:$ServerPort")
+        LAUNCHER_VERSION    = (ConvertTo-PowerShellLiteral $modVersion)
+        PRIMARY_JAR         = (ConvertTo-PowerShellLiteral "versions/$versionId/$versionId.jar")
+        NATIVES_DIR         = (ConvertTo-PowerShellLiteral "versions/$versionId/natives")
+        LOGGING_CONFIG_LINE = $(if ($loggingConfigPath) { '$logging_config_path = Join-Path $PSScriptRoot ' + (ConvertTo-PowerShellLiteral $loggingConfigPath) } else { "" })
+        CLASSPATH_ENTRIES   = (($classpathPaths | ForEach-Object { '    (Join-Path $library_directory ' + (ConvertTo-PowerShellLiteral $_) + ')' }) -join "`n")
+        MAIN_CLASS          = (ConvertTo-PowerShellLiteral ([string]$versionObject.mainClass))
+        JVM_ARGUMENTS       = (($jvmArguments | ForEach-Object { '    ' + (ConvertTo-PowerShellLiteral ([string]$_)) }) -join "`n")
+        GAME_ARGUMENTS      = (($gameArguments | ForEach-Object { '    ' + (ConvertTo-PowerShellLiteral ([string]$_)) }) -join "`n")
     }
-    $lines.Add('$classpath = @(')
-    foreach ($classpathPath in $classpathPaths) {
-        $lines.Add('    (Join-Path $library_directory ' + (ConvertTo-PowerShellLiteral $classpathPath) + ')')
-    }
-    $lines.Add('    $primary_jar')
-    $lines.Add(') -join $classpath_separator')
-    $lines.Add('$java = "java"')
-    $lines.Add('$mainClass = ' + (ConvertTo-PowerShellLiteral ([string]$versionObject.mainClass)))
-    $lines.Add('$jvmArgs = @(')
-    foreach ($jvmArgument in $jvmArguments) {
-        $lines.Add('    ' + (ConvertTo-PowerShellLiteral ([string]$jvmArgument)))
-    }
-    $lines.Add(')')
-    $lines.Add('$gameArgs = @(')
-    foreach ($gameArgument in $gameArguments) {
-        $lines.Add('    ' + (ConvertTo-PowerShellLiteral ([string]$gameArgument)))
-    }
-    $lines.Add(')')
-    $lines.Add("")
-    $lines.Add('& $java @jvmArgs $mainClass @gameArgs')
-    $lines.Add('exit $LASTEXITCODE')
-    Set-Content -LiteralPath (Join-Path $ClientDir "$versionId.ps1") -Value $lines.ToArray() -Encoding utf8
+    $content = $LaunchTemplate
+    foreach ($token in $tokens.Keys) { $content = $content.Replace("@@$token@@", $tokens[$token]) }
+    # Set-Content terminates every value with the platform newline; normalise first so the
+    # generated file keeps the exact line endings the old line-by-line builder produced.
+    $content = $content -replace '\r?\n', [Environment]::NewLine
+    Set-Content -LiteralPath (Join-Path $ClientDir "$versionId.ps1") -Value $content -Encoding utf8
 }
 
-if ($env:GITHUB_OUTPUT) {
-    # 1.16.3/1.16.4 Forge relies on Java internal APIs and is incompatible with Java 8u321+.
-    "java=$("$javaMajor" -eq "8" ? '8.0.312' : "$javaMajor")" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-    "clients=$($clients -join ',')" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-}
-Write-Host "[$(Get-Date -Format s)] Done. Java $javaMajor, clients: $($clients -join ', ')"
+# 1.16.3/1.16.4 Forge relies on Java internal APIs and is incompatible with Java 8u321+,
+# so Java 8 is pinned to a known good build.
+"java=$("$javaMajor" -eq "8" ? '8.0.312' : "$javaMajor")" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+"clients=$($clients -join ',')" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+Write-Step "Done. Java $javaMajor, clients: $($clients -join ', ')"
