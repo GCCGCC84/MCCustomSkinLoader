@@ -58,10 +58,10 @@ function Resolve-LoaderBuilds {
     param([string[]]$Versions, [string[]]$GameVersions, [string]$Loader, [scriptblock]$Prefix)
     $result = @{}
     foreach ($gameVersion in $GameVersions) {
-        $prefix = & $Prefix $gameVersion
-        $hits = @($Versions | Where-Object { $_.StartsWith($prefix) })
+        $buildPrefix = & $Prefix $gameVersion
+        $hits = @($Versions | Where-Object { $_.StartsWith($buildPrefix) })
         if ($hits.Count -eq 0) { Log "${Loader}: no build for $gameVersion, skipped"; continue }
-        $result[$gameVersion] = [string]@($hits | Sort-Object { Get-VersionSortKey ($_.Substring($prefix.Length)) })[-1]
+        $result[$gameVersion] = [string]@($hits | Sort-Object { Get-VersionSortKey ($_.Substring($buildPrefix.Length)) })[-1]
     }
     return $result
 }

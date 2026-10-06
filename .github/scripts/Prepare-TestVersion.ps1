@@ -116,8 +116,8 @@ function Test-Rules {
             }
         }
         if ($matched -and $rule.features) {
-            foreach ($feature in $rule.features.PSObject.Properties) {
-                if ($Features[$feature.Name] -ne $feature.Value) { $matched = $false; break }
+            foreach ($featureFlag in $rule.features.PSObject.Properties) {
+                if ($Features[$featureFlag.Name] -ne $featureFlag.Value) { $matched = $false; break }
             }
         }
         if ($matched) { $allowed = [string]$rule.action -eq "allow" }
