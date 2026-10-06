@@ -6,6 +6,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$StallSeconds = 30
+$MaxAttempts = 3
+$AttemptDeadlineMinutes = 3
+
 if (-not [System.IO.Path]::IsPathRooted($RunDir)) {
     $RunDir = Join-Path (Get-Location).Path $RunDir
 }
@@ -89,20 +93,49 @@ if (-not (Test-Path -LiteralPath $serverJar)) {
 Write-Host "Starting server for $MinecraftVersion"
 $serverOut = Join-Path $ServerDir "test-server.log"
 $serverErr = Join-Path $ServerDir "test-server.err.log"
-$server = Start-Process -FilePath "java" -ArgumentList @("-Xmx2G", "-jar", "`"$serverJar`"", "nogui") `
-    -WorkingDirectory $ServerDir -RedirectStandardOutput $serverOut -RedirectStandardError $serverErr -PassThru -NoNewWindow
-
-$serverLineCount = 0
+$server = $null
 $serverReady = $false
-$serverDeadline = (Get-Date).AddMinutes(5)
-while ((Get-Date) -lt $serverDeadline) {
-    $newLines = Get-NewLines $serverOut $serverLineCount
-    foreach ($line in $newLines) { Write-Host "[server] $line" }
-    $serverLineCount += $newLines.Count
-    $serverText = if (Test-Path -LiteralPath $serverOut) { Get-Content -LiteralPath $serverOut -Raw } else { "" }
-    if ($serverText -match $ServerReadyPattern) { $serverReady = $true; break }
-    if ($server.HasExited) { break }
-    Start-Sleep -Milliseconds 500
+$serverReason = ""
+for ($serverAttempt = 1; $serverAttempt -le $MaxAttempts; $serverAttempt++) {
+    if ($server) {
+        Stop-ProcessTree $server
+        Start-Sleep -Seconds 3
+    }
+    $previousReason = if ($serverAttempt -gt 1) { " (previous attempt: $serverReason)" } else { "" }
+    Write-Host "[server] attempt $serverAttempt/$MaxAttempts starting$previousReason"
+    $server = Start-Process -FilePath "java" -ArgumentList @("-Xmx2G", "-jar", "`"$serverJar`"", "nogui") `
+        -WorkingDirectory $ServerDir -RedirectStandardOutput $serverOut -RedirectStandardError $serverErr -PassThru -NoNewWindow
+
+    $serverOutLineCount = 0
+    $serverErrLineCount = 0
+    $lastOutputAt = Get-Date
+    $attemptDeadline = (Get-Date).AddMinutes($AttemptDeadlineMinutes)
+    $serverReason = ""
+    while ((Get-Date) -lt $attemptDeadline) {
+        $newOutLines = Get-NewLines $serverOut $serverOutLineCount
+        foreach ($line in $newOutLines) { Write-Host "[server] $line" }
+        if ($newOutLines.Count -gt 0) { $lastOutputAt = Get-Date }
+        $serverOutLineCount += $newOutLines.Count
+
+        $newErrLines = Get-NewLines $serverErr $serverErrLineCount
+        foreach ($line in $newErrLines) { Write-Host "[server] $line" }
+        if ($newErrLines.Count -gt 0) { $lastOutputAt = Get-Date }
+        $serverErrLineCount += $newErrLines.Count
+
+        $serverText = if (Test-Path -LiteralPath $serverOut) { Get-Content -LiteralPath $serverOut -Raw } else { "" }
+        if ($serverText -match $ServerReadyPattern) { $serverReady = $true; break }
+        if ($server.HasExited) { $serverReason = "exited"; break }
+        if (((Get-Date) - $lastOutputAt).TotalSeconds -ge $StallSeconds) {
+            $serverReason = "stall, no output for $($StallSeconds)s"
+            break
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    if ($serverReady) { break }
+    if (-not $serverReason) {
+        $serverReason = "deadline, no ready marker after $($AttemptDeadlineMinutes) minutes"
+    }
+    Write-Host "[server] attempt $serverAttempt/$MaxAttempts failed: $serverReason"
 }
 
 $failed = $false
@@ -124,79 +157,113 @@ if ($serverReady) {
             continue
         }
 
-        $clientOut = Join-Path $ClientLogDir "$clientName.log"
-        Remove-Item -LiteralPath $clientOut -Force -ErrorAction SilentlyContinue
+        $clientReason = ""
+        $clientSucceeded = $false
+        for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+            $attemptSuffix = if ($attempt -eq 1) { "" } else { ".attempt$attempt" }
+            $clientOut = Join-Path $ClientLogDir "$clientName$attemptSuffix.log"
+            Remove-Item -LiteralPath $clientOut -Force -ErrorAction SilentlyContinue
 
-        $screenshotsBefore = @(Get-ChildItem -LiteralPath $ScreenshotsDir -File -ErrorAction SilentlyContinue).Count
-        $cslLaunchTime = (Get-Date).ToUniversalTime()
+            $screenshotsBefore = @(Get-ChildItem -LiteralPath $ScreenshotsDir -File -ErrorAction SilentlyContinue).Count
+            $cslLaunchTime = (Get-Date).ToUniversalTime()
+            $clientLineCount = 0
+            $cslLineCount = 0
+            $skinLoaded = $false
 
-        Write-Host "[$clientName] launching"
-        $command = "& '$clientScript' 2>&1 | Tee-Object -FilePath '$clientOut'"
-        $client = Start-Process -FilePath "pwsh" -ArgumentList @("-NoProfile", "-Command", $command) -WorkingDirectory $ClientDir -PassThru -NoNewWindow
+            $previousReason = if ($attempt -gt 1) { " (previous attempt: $clientReason)" } else { "" }
+            Write-Host "[$clientName] attempt $attempt/$MaxAttempts launching$previousReason"
+            $command = "& '$clientScript' 2>&1 | Tee-Object -FilePath '$clientOut'"
+            $client = Start-Process -FilePath "pwsh" -ArgumentList @("-NoProfile", "-Command", $command) -WorkingDirectory $ClientDir -PassThru -NoNewWindow
 
-        $clientLineCount = 0
-        $cslLineCount = 0
-        $skinLoaded = $false
-        $clientDeadline = (Get-Date).AddMinutes(5)
-        while ((Get-Date) -lt $clientDeadline) {
-            $newLines = Get-NewLines $clientOut $clientLineCount
-            foreach ($line in $newLines) {
-                Write-Host "[$clientName] $line"
-                foreach ($marker in $SkinLoadedMarkers) { if ($line.Contains($marker)) { $skinLoaded = $true } }
-            }
-            $clientLineCount += $newLines.Count
+            $lastOutputAt = Get-Date
+            $attemptDeadline = (Get-Date).AddMinutes($AttemptDeadlineMinutes)
+            $clientReason = ""
+            while ((Get-Date) -lt $attemptDeadline) {
+                $newLines = Get-NewLines $clientOut $clientLineCount
+                foreach ($line in $newLines) {
+                    Write-Host "[$clientName] $line"
+                    foreach ($marker in $SkinLoadedMarkers) { if ($line.Contains($marker)) { $skinLoaded = $true } }
+                }
+                if ($newLines.Count -gt 0) { $lastOutputAt = Get-Date }
+                $clientLineCount += $newLines.Count
 
-            if (Test-Path -LiteralPath $CustomSkinLoaderLog) {
-                $cslInfo = Get-Item -LiteralPath $CustomSkinLoaderLog
-                if ($cslInfo.LastWriteTimeUtc -gt $cslLaunchTime) {
-                    $cslNewLines = Get-NewLines $CustomSkinLoaderLog $cslLineCount
-                    foreach ($line in $cslNewLines) {
-                        Write-Host "[$clientName:csl] $line"
-                        foreach ($marker in $SkinLoadedMarkers) { if ($line.Contains($marker)) { $skinLoaded = $true } }
+                if (Test-Path -LiteralPath $CustomSkinLoaderLog) {
+                    $cslInfo = Get-Item -LiteralPath $CustomSkinLoaderLog
+                    if ($cslInfo.LastWriteTimeUtc -gt $cslLaunchTime) {
+                        $cslNewLines = Get-NewLines $CustomSkinLoaderLog $cslLineCount
+                        foreach ($line in $cslNewLines) {
+                            Write-Host "[$clientName:csl] $line"
+                            foreach ($marker in $SkinLoadedMarkers) { if ($line.Contains($marker)) { $skinLoaded = $true } }
+                        }
+                        if ($cslNewLines.Count -gt 0) { $lastOutputAt = Get-Date }
+                        $cslLineCount += $cslNewLines.Count
                     }
-                    $cslLineCount += $cslNewLines.Count
+                }
+
+                if ($skinLoaded) { break }
+                if ($client.HasExited) { $clientReason = "exited"; break }
+                if (((Get-Date) - $lastOutputAt).TotalSeconds -ge $StallSeconds) {
+                    $clientReason = "stall, no output for $($StallSeconds)s"
+                    break
+                }
+                Start-Sleep -Milliseconds 500
+            }
+            if (-not $skinLoaded -and -not $clientReason) {
+                $clientReason = "deadline, no skin marker after $($AttemptDeadlineMinutes) minutes"
+            }
+
+            if ($skinLoaded) {
+                Write-Host "[$clientName] skin loaded, waiting 15 second"
+                Start-Sleep -Seconds 15 # Wait for the "Chat message can't be verified" popup to auto-close so it doesn't block the Tab player list.
+                if (-not (Send-GameKeys)) {
+                    $clientReason = "window not found"
+                } else {
+                    $screenshotFound = $false
+                    $screenshotDeadline = (Get-Date).AddSeconds(30)
+                    while ((Get-Date) -lt $screenshotDeadline) {
+                        $screenshotsAfter = @(Get-ChildItem -LiteralPath $ScreenshotsDir -File -ErrorAction SilentlyContinue).Count
+                        if ($screenshotsAfter -gt $screenshotsBefore) { $screenshotFound = $true; break }
+                        Start-Sleep -Milliseconds 500
+                    }
+                    if ($screenshotFound) {
+                        Write-Host "[$clientName] screenshot captured"
+                    } else {
+                        Write-Host "[$clientName] screenshot not found"
+                        $clientReason = "screenshot not found"
+                    }
                 }
             }
 
-            if ($skinLoaded) { break }
-            if ($client.HasExited) { break }
-            Start-Sleep -Milliseconds 500
+            $remainingLines = Get-NewLines $clientOut $clientLineCount
+            foreach ($line in $remainingLines) { Write-Host "[$clientName] $line" }
+            if (Test-Path -LiteralPath $CustomSkinLoaderLog) {
+                Copy-Item -LiteralPath $CustomSkinLoaderLog -Destination (Join-Path $ClientLogDir "$clientName-CustomSkinLoader$attemptSuffix.log") -Force
+            }
+
+            if (-not $clientReason) {
+                $clientSucceeded = $true
+                Stop-ProcessTree $client
+                Start-Sleep -Seconds 2
+                break
+            }
+
+            Write-Host "[$clientName] attempt $attempt/$MaxAttempts failed: $clientReason"
+            Stop-ProcessTree $client
+            if ($attempt -ge $MaxAttempts) { break }
+
+            $serverReleaseFrom = @(Get-Content -LiteralPath $serverOut -ErrorAction SilentlyContinue).Count
+            $releaseDeadline = (Get-Date).AddSeconds(10)
+            while ((Get-Date) -lt $releaseDeadline) {
+                $releaseLines = Get-NewLines $serverOut $serverReleaseFrom
+                if (($releaseLines -join "`n").Contains(" left the game")) { break }
+                Start-Sleep -Milliseconds 500
+            }
         }
 
-        if (-not $skinLoaded) {
+        if (-not $clientSucceeded) {
             Write-Host "[$clientName] skin not loaded"
             $failed = $true
-            Stop-ProcessTree $client
-            continue
         }
-
-        Write-Host "[$clientName] skin loaded, waiting 15 second"
-        Start-Sleep -Seconds 15 # Wait for the "Chat message can't be verified" popup to auto-close so it doesn't block the Tab player list.
-        if (-not (Send-GameKeys)) {
-            $failed = $true
-        }
-
-        $screenshotFound = $false
-        $screenshotDeadline = (Get-Date).AddSeconds(30)
-        while ((Get-Date) -lt $screenshotDeadline) {
-            $screenshotsAfter = @(Get-ChildItem -LiteralPath $ScreenshotsDir -File -ErrorAction SilentlyContinue).Count
-            if ($screenshotsAfter -gt $screenshotsBefore) { $screenshotFound = $true; break }
-            Start-Sleep -Milliseconds 500
-        }
-        if ($screenshotFound) {
-            Write-Host "[$clientName] screenshot captured"
-        } else {
-            Write-Host "[$clientName] screenshot not found"
-            $failed = $true
-        }
-
-        $remainingLines = Get-NewLines $clientOut $clientLineCount
-        foreach ($line in $remainingLines) { Write-Host "[$clientName] $line" }
-        if (Test-Path -LiteralPath $CustomSkinLoaderLog) {
-            Copy-Item -LiteralPath $CustomSkinLoaderLog -Destination (Join-Path $ClientLogDir "$clientName-CustomSkinLoader.log") -Force
-        }
-        Stop-ProcessTree $client
-        Start-Sleep -Seconds 2
     }
 }
 
