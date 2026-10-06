@@ -20,7 +20,7 @@ $ServerPort = 25565
 $WorkingDirectory = (Get-Location).Path
 $TestJarPath = Join-Path $WorkingDirectory "Test/run/client/CustomSkinLoader-Test-1.0.0.jar"
 $InstallerLogsDir = Join-Path $WorkingDirectory "installer-logs"
-$InstallerJava = Join-Path $env:JAVA_HOME_25_X64 "bin/java.exe"
+$JavaRuntimeIndexUrl = "https://piston-meta.mojang.com/v1/products/java-runtime/2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json"
 $ExternalArgs = Import-PowerShellDataFile -LiteralPath (Join-Path $PSScriptRoot "ExternalArgs.psd1")
 
 $OsName = "windows"
@@ -47,13 +47,15 @@ $AssetsDir = Join-Path $ClientDir "assets"
 $AssetIndexesDir = Join-Path $AssetsDir "indexes"
 $AssetObjectsDir = Join-Path $AssetsDir "objects"
 $LogConfigsDir = Join-Path $AssetsDir "log_configs"
+$JavaDir = Join-Path $RunDir "java"
+$MesaDir = Join-Path $RunDir "mesa"
 
 # --- small helpers ---
 # Timestamped progress line, so every step is easy to spot in the CI log.
 function Write-Step { param([string]$Message) Write-Host "[$(Get-Date -Format s)] $Message" }
 
-# Terse factory for the {Url,Path,Sha1} records consumed by Invoke-Downloads.
-function New-Dl { param([string]$Url, [string]$Path, [string]$Sha1 = "") [pscustomobject]@{ Url = $Url; Path = $Path; Sha1 = $Sha1 } }
+# Terse factory for the {Url,Path,Sha1,TimeoutSec} records consumed by Invoke-Downloads.
+function New-Dl { param([string]$Url, [string]$Path, [string]$Sha1 = "", [int]$TimeoutSec = 10) [pscustomobject]@{ Url = $Url; Path = $Path; Sha1 = $Sha1; TimeoutSec = $TimeoutSec } }
 
 # SHA-1 verified, parallel, retrying downloader. Files whose hash already matches are
 # skipped; everything else is fetched as "<path>.download" and only moved into place
@@ -67,12 +69,14 @@ function Invoke-Downloads {
         if (-not $url) { return }
         $path = [string]$_.Path
         $expectedSha1 = if ($_.Sha1) { ([string]$_.Sha1).ToUpperInvariant() } else { "" }
+        $timeoutSec = [int]$_.TimeoutSec
         $isValid = {
             param([string]$File)
             if (-not (Test-Path -LiteralPath $File -PathType Leaf)) { return $false }
-            if ((Get-Item -LiteralPath $File -Force).Length -le 0) { return $false }
-            if ($expectedSha1 -and (Get-FileHash -LiteralPath $File -Algorithm SHA1).Hash -ne $expectedSha1) { return $false }
-            return $true
+            # A hash is authoritative (some Java runtime files are legitimately empty); the
+            # non-empty fallback only applies to files downloaded without an expected hash.
+            if ($expectedSha1) { return (Get-FileHash -LiteralPath $File -Algorithm SHA1).Hash -eq $expectedSha1 }
+            return (Get-Item -LiteralPath $File -Force).Length -gt 0
         }
         if (& $isValid $path) { return }    # already cached and verified
         $directory = Split-Path -Parent $path
@@ -81,7 +85,7 @@ function Invoke-Downloads {
         for ($attempt = 1; $attempt -le 5; $attempt++) {
             try {
                 if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force }
-                Invoke-WebRequest -Uri $url -OutFile $temp -TimeoutSec 10
+                Invoke-WebRequest -Uri $url -OutFile $temp -TimeoutSec $timeoutSec
                 if (-not (& $isValid $temp)) { throw "SHA1 verification failed" }
                 Move-Item -LiteralPath $temp -Destination $path -Force
                 return
@@ -125,13 +129,10 @@ function Test-Rules {
     return $allowed
 }
 
-# Maven base URL of a library: explicit "url", else a well known repo derived from the
-# group id, else the vanilla libraries host. Always returned with a trailing slash.
+# Maven base URL of a library: explicit "url", else the vanilla libraries host. Always returned with a trailing slash.
 function Get-LibraryBaseUrl {
     param($Library, [string[]]$Parts)
     $url = if ($Library.url) { [string]$Library.url }
-    elseif ($Parts[0] -eq "net.minecraftforge") { "https://maven.minecraftforge.net/" }
-    elseif ($Parts[0] -eq "net.neoforged") { "https://maven.neoforged.net/releases/" }
     else { "https://libraries.minecraft.net/" }
     if (-not $url.EndsWith("/")) { $url += "/" }
     return $url
@@ -248,7 +249,7 @@ $classpath = @(
 @@CLASSPATH_ENTRIES@@
     $primary_jar
 ) -join $classpath_separator
-$java = "java"
+$java = Join-Path $PSScriptRoot "../java/bin/java.exe"
 $mainClass = @@MAIN_CLASS@@
 $jvmArgs = @(
 @@JVM_ARGUMENTS@@)
@@ -260,7 +261,7 @@ exit $LASTEXITCODE
 '@
 
 # ======= main =======
-foreach ($directory in @($RunDir, $ClientDir, $ServerDir, $VersionsDir, $LibrariesDir, $AssetIndexesDir, $AssetObjectsDir, $LogConfigsDir, $InstallerLogsDir)) {
+foreach ($directory in @($RunDir, $ClientDir, $ServerDir, $VersionsDir, $LibrariesDir, $AssetIndexesDir, $AssetObjectsDir, $LogConfigsDir, $InstallerLogsDir, $JavaDir)) {
     New-Item -ItemType Directory -Force -Path $directory | Out-Null
 }
 
@@ -270,8 +271,42 @@ Write-Step "Downloading version JSON"
 $versionJsonPath = Join-Path $VersionsDir $MinecraftVersion "$MinecraftVersion.json"
 Invoke-Downloads -Downloads (New-Dl $MinecraftJsonUrl $versionJsonPath $MinecraftJsonSha1)
 $versionJson = Get-Content -LiteralPath $versionJsonPath -Raw | ConvertFrom-Json
-# Java 8 is the floor: "javaVersion" does not exist in older (pre-1.17) version JSONs.
-$javaMajor = if ($versionJson.javaVersion.majorVersion) { [int]$versionJson.javaVersion.majorVersion } else { 8 }
+
+# --- Mojang Java runtime ---
+# "javaVersion.component" names an entry of the Mojang java-runtime index; very old
+# version JSONs predate the field and were always launched with jre-legacy.
+$javaComponent = if ($versionJson.javaVersion.component) { [string]$versionJson.javaVersion.component } else { "jre-legacy" }
+Write-Step "Downloading Java runtime $javaComponent"
+$javaIndexPath = Join-Path $RunDir "java-runtime-index.json"
+Invoke-Downloads -Downloads (New-Dl $JavaRuntimeIndexUrl $javaIndexPath)
+$javaIndex = Get-Content -LiteralPath $javaIndexPath -Raw | ConvertFrom-Json
+$javaRuntimes = @($javaIndex.'windows-x64'.$javaComponent | Where-Object { $_ })
+if ($javaRuntimes.Count -eq 0) { throw "No Mojang Java runtime '$javaComponent' for windows-x64" }
+$javaRuntime = @($javaRuntimes | Sort-Object { $_.version.released })[-1]
+$javaManifestPath = Join-Path $JavaDir "manifest.json"
+Invoke-Downloads -Downloads (New-Dl ([string]$javaRuntime.manifest.url) $javaManifestPath ([string]$javaRuntime.manifest.sha1))
+$javaManifest = Get-Content -LiteralPath $javaManifestPath -Raw | ConvertFrom-Json
+foreach ($file in $javaManifest.files.PSObject.Properties) {
+    if ($file.Value.type -eq "directory") { New-Item -ItemType Directory -Force -Path (Join-Path $JavaDir ($file.Name -replace "/", [System.IO.Path]::DirectorySeparatorChar)) | Out-Null }
+}
+$javaDownloads = @($javaManifest.files.PSObject.Properties | Where-Object { $_.Value.type -eq "file" } | ForEach-Object {
+    New-Dl ([string]$_.Value.downloads.raw.url) (Join-Path $JavaDir ($_.Name -replace "/", [System.IO.Path]::DirectorySeparatorChar)) ([string]$_.Value.downloads.raw.sha1) 600
+})
+Write-Step "Downloading $($javaDownloads.Count) Java runtime file(s)"
+Invoke-Downloads -Downloads $javaDownloads
+$InstallerJava = Join-Path $JavaDir "bin/java.exe"
+
+# --- Mesa3D ---
+# The runner has no GPU, so OpenGL is provided by Mesa's software renderer. The DLLs go
+# next to java.exe so every JVM (installers, server, clients) picks them up.
+Write-Step "Setting up Mesa3D"
+New-Item -ItemType Directory -Force -Path $MesaDir | Out-Null
+gh release download --repo pal1000/mesa-dist-win --pattern "mesa3d-*-release-msvc.7z" --dir $MesaDir --clobber
+if ($LASTEXITCODE -ne 0) { throw "Failed to download Mesa3D (exit code $LASTEXITCODE)" }
+$mesaArchive = @(Get-ChildItem -LiteralPath $MesaDir -Filter "*.7z")[-1]
+7z x "$($mesaArchive.FullName)" "-o$(Join-Path $MesaDir 'extracted')" -y | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Failed to extract Mesa3D (exit code $LASTEXITCODE)" }
+Copy-Item -Path (Join-Path $MesaDir "extracted/x64/*.dll") -Destination (Join-Path $JavaDir "bin") -Force
 
 # --- mod loader installers ---
 $installers = @($InstallersJson | ConvertFrom-Json)
@@ -283,12 +318,9 @@ Write-Step "Downloading $($installerDownloads.Count) installer(s)"
 Invoke-Downloads -Downloads $installerDownloads
 
 Write-Step "Installing mod loaders with $InstallerJava"
-# The Forge 1.14.3 installer performs the DEOBF_REALMS post-processing step
-# (net.minecraftforge.installertools.DeobfRealms), and when it downloads
-# libraries/com/mojang/realms/1.14.17/realms-1.14.17.jar it does not create the parent
-# directory, so installing in an empty directory throws NoSuchFileException, causing
-# "Failed to download realms jar". Only the 1.14.3 Forge installer has this processor in
-# the current matrix, so the directory is created in advance here.
+# The Forge 1.14.3 installer performs the DEOBF_REALMS post-processing step (net.minecraftforge.installertools.DeobfRealms), and when it downloads
+# libraries/com/mojang/realms/1.14.17/realms-1.14.17.jar it does not create the parent directory, so installing in an empty directory throws NoSuchFileException,
+# causing "Failed to download realms jar". Only the 1.14.3 Forge installer has this processor in the current matrix, so the directory is created in advance here.
 New-Item -ItemType Directory -Force -Path (Join-Path $LibrariesDir "com/mojang/realms/1.14.17") | Out-Null
 
 foreach ($installer in $installers) {
@@ -552,8 +584,5 @@ foreach ($versionObject in $allVersions) {
     Set-Content -LiteralPath (Join-Path $ClientDir "$versionId.ps1") -Value $content -Encoding utf8
 }
 
-# 1.16.3/1.16.4 Forge relies on Java internal APIs and is incompatible with Java 8u321+,
-# so Java 8 is pinned to a known good build.
-"java=$("$javaMajor" -eq "8" ? '8.0.312' : "$javaMajor")" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 "clients=$($clients -join ',')" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-Write-Step "Done. Java $javaMajor, clients: $($clients -join ', ')"
+Write-Step "Done. Java $javaComponent, clients: $($clients -join ', ')"

@@ -88,6 +88,7 @@ function Wait-LoggedProcess {
 New-Item -ItemType Directory -Force -Path $ClientLogDir, $ScreenshotsDir | Out-Null
 
 $serverJar = Join-Path $ServerDir "$MinecraftVersion.jar"
+$JavaExe = Join-Path $RunDir "java/bin/java.exe"
 
 Write-Host "Starting server for $MinecraftVersion"
 $server = $null
@@ -98,7 +99,7 @@ $serverLogs = @(@{ Path = $ServerOut; Prefix = "[server] "; Pos = 0 })
 for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
     if ($server) { Stop-ProcessTree $server; Start-Sleep -Seconds 3 }
     Write-Host "[server] attempt $attempt/$MaxAttempts starting$(if ($attempt -gt 1) { " (previous attempt: $reason)" })"
-    $command = "& java -Xmx2G -jar '$serverJar' nogui 2>&1 | Tee-Object -FilePath '$ServerOut'"
+    $command = "& '$JavaExe' -Xmx2G -jar '$serverJar' nogui 2>&1 | Tee-Object -FilePath '$ServerOut'"
     $server = Start-Process -FilePath "pwsh" -ArgumentList @("-NoProfile", "-Command", $command) -WorkingDirectory $ServerDir -PassThru -NoNewWindow
     $reason = Wait-LoggedProcess $server $serverLogs $serverReady "deadline, no ready marker after $($DeadlineMinutes) minutes"
     if (-not $reason) { break }
