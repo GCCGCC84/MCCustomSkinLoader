@@ -137,13 +137,6 @@ function Get-LibraryBaseUrl {
     return $url
 }
 
-# Maven-relative path (group/artifact/version/file.jar) of a "group:artifact:version[:classifier]" name.
-function Get-LibraryDerivedPath {
-    param([string[]]$Parts)
-    $suffix = if ($Parts.Count -ge 4 -and $Parts[3]) { "-$($Parts[3])" } else { "" }
-    return "$($Parts[0] -replace '\.', '/')/$($Parts[1])/$($Parts[2])/$($Parts[1])-$($Parts[2])$suffix.jar"
-}
-
 # Normalizes an artifact (or natives classifier) node into {Path,Url,Sha1}. When the JSON
 # has no such node the path is derived from the name instead of leaving it unresolved.
 function New-ArtifactRecord {
@@ -153,7 +146,8 @@ function New-ArtifactRecord {
         return [pscustomobject]@{ Path = [string]$Artifact.path; Url = $url; Sha1 = [string]$Artifact.sha1 }
     }
     $childParts = if ($Classifier) { @($Parts[0], $Parts[1], $Parts[2], $Classifier) } else { $Parts }
-    $path = Get-LibraryDerivedPath $childParts
+    $suffix = if ($childParts.Count -ge 4 -and $childParts[3]) { "-$($childParts[3])" } else { "" }
+    $path = "$($childParts[0] -replace '\.', '/')/$($childParts[1])/$($childParts[2])/$($childParts[1])-$($childParts[2])$suffix.jar"
     return [pscustomobject]@{ Path = $path; Url = ((Get-LibraryBaseUrl $Library $Parts) + $path); Sha1 = "" }
 }
 

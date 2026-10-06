@@ -16,32 +16,17 @@ $QuiltInstallerMetadataUrl  = "https://maven.quiltmc.org/repository/release/org/
 # Timestamped progress message.
 function Log([string]$Message) { Write-Host "[$(Get-Date -Format s)] $Message" }
 
-# Run a scriptblock, retrying with linear backoff.
-function Invoke-WithRetry {
-    param([scriptblock]$Script, [int]$Retries = 5)
-    for ($i = 1; $i -le $Retries; $i++) {
-        try { return & $Script } catch {
-            if ($i -ge $Retries) { throw }
-            Start-Sleep -Seconds ($i * 2)
+# Download a URL with 5 attempts and linear backoff; -AsJson returns parsed JSON instead of raw text.
+function Get-Remote([string]$Url, [switch]$AsJson) {
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        try {
+            if ($AsJson) { return Invoke-RestMethod -Uri $Url -TimeoutSec 120 }
+            return (Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 120).Content
+        } catch {
+            if ($attempt -ge 5) { throw }
+            Start-Sleep -Seconds ($attempt * 2)
         }
     }
-}
-
-# Download a URL (retried); -AsJson returns parsed JSON instead of raw text.
-function Get-Remote([string]$Url, [switch]$AsJson) {
-    Invoke-WithRetry {
-        if ($AsJson) { Invoke-RestMethod -Uri $Url -TimeoutSec 120 }
-        else { (Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 120).Content }
-    }
-}
-
-# Convert a dotted version into a fixed-width, lexically sortable key.
-function Get-VersionSortKey([string]$Value) {
-    $key = (($Value -split "-")[0] -split "\." | ForEach-Object {
-        $n = 0; if ($_ -match "^\d+$") { $n = [int]$_ }
-        $n.ToString("D10")
-    }) -join ""
-    return $key.PadRight(80, "0")
 }
 
 # Newest release from Maven metadata: release, then latest, then last listed.
@@ -61,7 +46,13 @@ function Resolve-LoaderBuilds {
         $buildPrefix = & $Prefix $gameVersion
         $hits = @($Versions | Where-Object { $_.StartsWith($buildPrefix) })
         if ($hits.Count -eq 0) { Log "${Loader}: no build for $gameVersion, skipped"; continue }
-        $result[$gameVersion] = [string]@($hits | Sort-Object { Get-VersionSortKey ($_.Substring($buildPrefix.Length)) })[-1]
+        $result[$gameVersion] = [string]@($hits | Sort-Object {
+            $key = ($_.Substring($buildPrefix.Length) -split "-")[0] -split "\." | ForEach-Object {
+                $n = 0; if ($_ -match "^\d+$") { $n = [int]$_ }
+                $n.ToString("D10")
+            }
+            ($key -join "").PadRight(80, "0")
+        })[-1]
     }
     return $result
 }
@@ -74,8 +65,8 @@ $gameVersions = @($info.game_versions)
 # --- Fetch version metadata ----------------------------------------------------
 Log "Fetching version metadata"
 $mojangManifest   = Get-Remote $GameVersionManifestUrl -AsJson
-$fabricGame       = @(Get-Remote $FabricGameVersionsUrl -AsJson)
-$quiltGame        = @(Get-Remote $QuiltGameVersionsUrl -AsJson)
+$fabricGame       = Get-Remote $FabricGameVersionsUrl -AsJson
+$quiltGame        = Get-Remote $QuiltGameVersionsUrl -AsJson
 $forgeVersions    = @(([xml](Get-Remote $ForgeMetadataUrl)).metadata.versioning.versions.version)
 $neoForgeVersions = @(([xml](Get-Remote $NeoForgeMetadataUrl)).metadata.versioning.versions.version)
 

@@ -55,20 +55,6 @@ function Send-GameKey {
     [TestJobNativeMethods]::SendMessage($Window, $msg, [IntPtr]$Key, $lp) | Out-Null
 }
 
-# F5 -> hold Tab -> F2 screenshot -> release Tab
-function Send-GameKeys {
-    $game = Get-Process -Name java -ErrorAction SilentlyContinue |
-            Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -like "Minecraft*" } | Select-Object -First 1
-    if (-not $game) { Write-Host "[keys] Minecraft window not found"; return $false }
-    Write-Host "[keys] window: $($game.MainWindowTitle)"
-    $w = $game.MainWindowHandle
-    Send-GameKey $w 0x74 $true; Send-GameKey $w 0x74 $false; Start-Sleep -Milliseconds 500  # F5: switch to third-person view
-    Send-GameKey $w 0x09 $true; Start-Sleep -Milliseconds 500                               # press and hold Tab (player list)
-    Send-GameKey $w 0x71 $true; Send-GameKey $w 0x71 $false; Start-Sleep -Milliseconds 500  # F2: take screenshot
-    Send-GameKey $w 0x09 $false                                                             # release Tab
-    return $true
-}
-
 # Poll logs: return $null once $Ready is true, otherwise return the failure reason (exited / stall / deadline).
 function Wait-LoggedProcess {
     param([System.Diagnostics.Process]$Process, [hashtable[]]$Logs, [scriptblock]$Ready, [string]$TimeoutMessage)
@@ -96,17 +82,6 @@ function Wait-LoggedProcess {
         Start-Sleep -Milliseconds 500
     }
     return $TimeoutMessage
-}
-
-# Wait until a new file appears in the screenshots directory (i.e. the F2 screenshot was written).
-function Wait-Screenshot {
-    param([int]$Before, [int]$Seconds = 30)
-    $deadline = (Get-Date).AddSeconds($Seconds)
-    while ((Get-Date) -lt $deadline) {
-        if (@(Get-ChildItem -LiteralPath $ScreenshotsDir -File -ErrorAction SilentlyContinue).Count -gt $Before) { return $true }
-        Start-Sleep -Milliseconds 500
-    }
-    return $false
 }
 
 # Make sure the client log and screenshot directories exist before launching anything.
@@ -159,9 +134,25 @@ if (-not $failed) {
                 # Wait for the "Chat message can't be verified" popup to close; otherwise it blocks the Tab player list.
                 Write-Host "[$clientName] skin loaded, waiting 15 seconds"
                 Start-Sleep -Seconds 15
-                if (-not (Send-GameKeys)) { $reason = "window not found" }
-                elseif (Wait-Screenshot $shotsBefore) { Write-Host "[$clientName] screenshot captured" }
-                else { Write-Host "[$clientName] screenshot not found"; $reason = "screenshot not found" }
+                $game = Get-Process -Name java -ErrorAction SilentlyContinue |
+                        Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -like "Minecraft*" } | Select-Object -First 1
+                if (-not $game) { Write-Host "[keys] Minecraft window not found"; $reason = "window not found" }
+                else {
+                    Write-Host "[keys] window: $($game.MainWindowTitle)"
+                    $w = $game.MainWindowHandle
+                    Send-GameKey $w 0x74 $true; Send-GameKey $w 0x74 $false; Start-Sleep -Milliseconds 500  # F5: switch to third-person view
+                    Send-GameKey $w 0x09 $true; Start-Sleep -Milliseconds 500                               # press and hold Tab (player list)
+                    Send-GameKey $w 0x71 $true; Send-GameKey $w 0x71 $false; Start-Sleep -Milliseconds 500  # F2: take screenshot
+                    Send-GameKey $w 0x09 $false                                                             # release Tab
+                    $screenshotDeadline = (Get-Date).AddSeconds(30)
+                    $captured = $false
+                    while ((Get-Date) -lt $screenshotDeadline) {
+                        if (@(Get-ChildItem -LiteralPath $ScreenshotsDir -File -ErrorAction SilentlyContinue).Count -gt $shotsBefore) { $captured = $true; break }
+                        Start-Sleep -Milliseconds 500
+                    }
+                    if ($captured) { Write-Host "[$clientName] screenshot captured" }
+                    else { Write-Host "[$clientName] screenshot not found"; $reason = "screenshot not found" }
+                }
             }
 
             # Print remaining logs + archive the CustomSkinLoader log.
