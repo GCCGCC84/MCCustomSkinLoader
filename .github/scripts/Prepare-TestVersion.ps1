@@ -82,7 +82,7 @@ function Invoke-Downloads {
             } catch {
                 if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
                 if ($attempt -ge 5) {
-                    if ($WarnOnFailure) {
+                    if ($using:WarnOnFailure) {
                         Write-Warning "Failed to download $url : $($_.Exception.Message)"
                         return
                     }

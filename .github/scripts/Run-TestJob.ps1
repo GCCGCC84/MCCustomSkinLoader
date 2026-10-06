@@ -170,8 +170,8 @@ if ($serverReady) {
             continue
         }
 
-        Write-Host "[$clientName] skin loaded, waiting 10 second"
-        Start-Sleep -Seconds 10
+        Write-Host "[$clientName] skin loaded, waiting 15 second"
+        Start-Sleep -Seconds 15 # Wait for the "Chat message can't be verified" popup to auto-close so it doesn't block the Tab player list.
         if (-not (Send-GameKeys)) {
             $failed = $true
         }
