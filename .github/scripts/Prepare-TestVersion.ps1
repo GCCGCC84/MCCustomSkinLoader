@@ -294,7 +294,7 @@ $javaDownloads = @($javaManifest.files.PSObject.Properties | Where-Object { $_.V
 })
 Write-Step "Downloading $($javaDownloads.Count) Java runtime file(s)"
 Invoke-Downloads -Downloads $javaDownloads
-$InstallerJava = Join-Path $JavaDir "bin/java.exe"
+$InstallerJava = Join-Path $env:JAVA_HOME_25_X64 "bin/java.exe"
 
 # --- Mesa3D ---
 # The runner has no GPU, so OpenGL is provided by Mesa's software renderer. The DLLs go
