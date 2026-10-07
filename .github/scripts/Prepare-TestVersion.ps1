@@ -47,7 +47,7 @@ $AssetsDir = Join-Path $ClientDir "assets"
 $AssetIndexesDir = Join-Path $AssetsDir "indexes"
 $AssetObjectsDir = Join-Path $AssetsDir "objects"
 $LogConfigsDir = Join-Path $AssetsDir "log_configs"
-$JavaDir = Join-Path $RunDir "java"
+$JavaBaseDir = Join-Path $RunDir "java"
 $MesaDir = Join-Path $RunDir "mesa"
 
 # --- small helpers ---
@@ -249,19 +249,18 @@ $classpath = @(
 @@CLASSPATH_ENTRIES@@
     $primary_jar
 ) -join $classpath_separator
-$java = Join-Path $PSScriptRoot "../java/bin/java.exe"
 $mainClass = @@MAIN_CLASS@@
 $jvmArgs = @(
 @@JVM_ARGUMENTS@@)
 $gameArgs = @(
 @@GAME_ARGUMENTS@@)
 
-& $java @jvmArgs $mainClass @gameArgs
+& java @jvmArgs $mainClass @gameArgs
 exit $LASTEXITCODE
 '@
 
 # ======= main =======
-foreach ($directory in @($RunDir, $ClientDir, $ServerDir, $VersionsDir, $LibrariesDir, $AssetIndexesDir, $AssetObjectsDir, $LogConfigsDir, $InstallerLogsDir, $JavaDir)) {
+foreach ($directory in @($RunDir, $ClientDir, $ServerDir, $VersionsDir, $LibrariesDir, $AssetIndexesDir, $AssetObjectsDir, $LogConfigsDir, $InstallerLogsDir, $JavaBaseDir)) {
     New-Item -ItemType Directory -Force -Path $directory | Out-Null
 }
 
@@ -283,22 +282,24 @@ $javaIndex = Get-Content -LiteralPath $javaIndexPath -Raw | ConvertFrom-Json
 $javaRuntimes = @($javaIndex.'windows-x64'.$javaComponent | Where-Object { $_ })
 if ($javaRuntimes.Count -eq 0) { throw "No Mojang Java runtime '$javaComponent' for windows-x64" }
 $javaRuntime = @($javaRuntimes | Sort-Object { $_.version.released })[-1]
-$javaManifestPath = Join-Path $JavaDir "manifest.json"
+$javaManifestPath = Join-Path $JavaBaseDir "manifest.json"
+$javaDir = Join-Path $JavaBaseDir $javaComponent
 Invoke-Downloads -Downloads (New-Dl ([string]$javaRuntime.manifest.url) $javaManifestPath ([string]$javaRuntime.manifest.sha1))
 $javaManifest = Get-Content -LiteralPath $javaManifestPath -Raw | ConvertFrom-Json
 foreach ($file in $javaManifest.files.PSObject.Properties) {
-    if ($file.Value.type -eq "directory") { New-Item -ItemType Directory -Force -Path (Join-Path $JavaDir ($file.Name -replace "/", [System.IO.Path]::DirectorySeparatorChar)) | Out-Null }
+    if ($file.Value.type -eq "directory") { New-Item -ItemType Directory -Force -Path (Join-Path $javaDir $file.Name) | Out-Null }
 }
 $javaDownloads = @($javaManifest.files.PSObject.Properties | Where-Object { $_.Value.type -eq "file" } | ForEach-Object {
-    New-Dl ([string]$_.Value.downloads.raw.url) (Join-Path $JavaDir ($_.Name -replace "/", [System.IO.Path]::DirectorySeparatorChar)) ([string]$_.Value.downloads.raw.sha1) 600
+    New-Dl ([string]$_.Value.downloads.raw.url) (Join-Path $javaDir $_.Name) ([string]$_.Value.downloads.raw.sha1) 600
 })
 Write-Step "Downloading $($javaDownloads.Count) Java runtime file(s)"
 Invoke-Downloads -Downloads $javaDownloads
+Join-Path $javaDir "bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 $InstallerJava = Join-Path $env:JAVA_HOME_25_X64 "bin/java.exe"
 
 # --- Mesa3D ---
-# The runner has no GPU, so OpenGL is provided by Mesa's software renderer. The DLLs go
-# next to java.exe so every JVM (installers, server, clients) picks them up.
+# The runner has no GPU, so OpenGL is provided by Mesa's software renderer.
+# The DLLs go next to java.exe so every JVM picks them up.
 Write-Step "Setting up Mesa3D"
 New-Item -ItemType Directory -Force -Path $MesaDir | Out-Null
 gh release download --repo pal1000/mesa-dist-win --pattern "mesa3d-*-release-msvc.7z" --dir $MesaDir --clobber
@@ -306,7 +307,7 @@ if ($LASTEXITCODE -ne 0) { throw "Failed to download Mesa3D (exit code $LASTEXIT
 $mesaArchive = @(Get-ChildItem -LiteralPath $MesaDir -Filter "*.7z")[-1]
 7z x "$($mesaArchive.FullName)" "-o$(Join-Path $MesaDir 'extracted')" -y | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Failed to extract Mesa3D (exit code $LASTEXITCODE)" }
-Copy-Item -Path (Join-Path $MesaDir "extracted/x64/*.dll") -Destination (Join-Path $JavaDir "bin") -Force
+Copy-Item -Path (Join-Path $MesaDir "extracted/x64/*.dll") -Destination (Join-Path $javaDir "bin") -Force
 
 # --- mod loader installers ---
 $installers = @($InstallersJson | ConvertFrom-Json)

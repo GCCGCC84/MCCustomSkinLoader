@@ -20,10 +20,10 @@ $ServerReadyPattern = "Done \("  # server log line emitted once the world is rea
 $RunDir = Join-Path (Get-Location).Path "Test/run"
 $ServerDir = Join-Path $RunDir "server"
 $ClientDir = Join-Path $RunDir "client"
+$ServerLogDir = Join-Path $ServerDir "logs"
 $ClientLogDir = Join-Path $ClientDir "logs"
 $ScreenshotsDir = Join-Path $ClientDir "screenshots"
 $CustomSkinLoaderLog = Join-Path $ClientDir "CustomSkinLoader/CustomSkinLoader.log"
-$ServerOut = Join-Path $ServerDir "test-server.log"
 
 # Load the Win32 helpers used to post synthetic key messages to the game window.
 Add-Type -TypeDefinition @"
@@ -88,18 +88,18 @@ function Wait-LoggedProcess {
 New-Item -ItemType Directory -Force -Path $ClientLogDir, $ScreenshotsDir | Out-Null
 
 $serverJar = Join-Path $ServerDir "$MinecraftVersion.jar"
-$JavaExe = Join-Path $RunDir "java/bin/java.exe"
 
 Write-Host "Starting server for $MinecraftVersion"
 $server = $null
 $reason = ""
-$serverReady = { (Get-Content -LiteralPath $ServerOut -Raw -ErrorAction SilentlyContinue) -match $ServerReadyPattern }
-$serverLogs = @(@{ Path = $ServerOut; Prefix = "[server] "; Pos = 0 })
+$serverOut = Join-Path $ServerLogDir "test-server.log"
+$serverReady = { (Get-Content -LiteralPath $serverOut -Raw -ErrorAction SilentlyContinue) -match $ServerReadyPattern }
+$serverLogs = @(@{ Path = $serverOut; Prefix = "[server] "; Pos = 0 })
 # Start the server, retrying a few times until it prints the "ready" marker.
 for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
     if ($server) { Stop-ProcessTree $server; Start-Sleep -Seconds 3 }
     Write-Host "[server] attempt $attempt/$MaxAttempts starting$(if ($attempt -gt 1) { " (previous attempt: $reason)" })"
-    $command = "& '$JavaExe' -Xmx2G -jar '$serverJar' nogui 2>&1 | Tee-Object -FilePath '$ServerOut'"
+    $command = "& java -Xmx2G -jar '$serverJar' nogui 2>&1 | Tee-Object -FilePath '$serverOut'"
     $server = Start-Process -FilePath "pwsh" -ArgumentList @("-NoProfile", "-Command", $command) -WorkingDirectory $ServerDir -PassThru -NoNewWindow
     $reason = Wait-LoggedProcess $server $serverLogs $serverReady "deadline, no ready marker after $($DeadlineMinutes) minutes"
     if (-not $reason) { break }
