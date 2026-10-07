@@ -286,12 +286,10 @@ $javaManifestPath = Join-Path $JavaBaseDir "manifest.json"
 $javaDir = Join-Path $JavaBaseDir $javaComponent
 Invoke-Downloads -Downloads (New-Dl ([string]$javaRuntime.manifest.url) $javaManifestPath ([string]$javaRuntime.manifest.sha1))
 $javaManifest = Get-Content -LiteralPath $javaManifestPath -Raw | ConvertFrom-Json
-foreach ($file in $javaManifest.files.PSObject.Properties) {
-    if ($file.Value.type -eq "directory") { New-Item -ItemType Directory -Force -Path (Join-Path $javaDir $file.Name) | Out-Null }
+$javaDownloads = foreach ($file in $javaManifest.files.PSObject.Properties) {
+    if ($file.Value.type -eq 'directory') { New-Item -ItemType Directory -Force -Path (Join-Path $javaDir $file.Name) | Out-Null }
+    elseif ($file.Value.type -eq 'file') { New-Dl ([string]$file.Value.downloads.raw.url) (Join-Path $javaDir $file.Name) ([string]$file.Value.downloads.raw.sha1) 600 }
 }
-$javaDownloads = @($javaManifest.files.PSObject.Properties | Where-Object { $_.Value.type -eq "file" } | ForEach-Object {
-    New-Dl ([string]$_.Value.downloads.raw.url) (Join-Path $javaDir $_.Name) ([string]$_.Value.downloads.raw.sha1) 600
-})
 Write-Step "Downloading $($javaDownloads.Count) Java runtime file(s)"
 Invoke-Downloads -Downloads $javaDownloads
 Join-Path $javaDir "bin" | Out-File -FilePath $env:GITHUB_PATH -Append

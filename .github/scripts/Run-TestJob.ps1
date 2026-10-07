@@ -84,8 +84,8 @@ function Wait-LoggedProcess {
     return $TimeoutMessage
 }
 
-# Make sure the client log and screenshot directories exist before launching anything.
-New-Item -ItemType Directory -Force -Path $ClientLogDir, $ScreenshotsDir | Out-Null
+# Make sure the log and screenshot directories exist before launching anything.
+New-Item -ItemType Directory -Force -Path $ServerLogDir, $ClientLogDir, $ScreenshotsDir | Out-Null
 
 $serverJar = Join-Path $ServerDir "$MinecraftVersion.jar"
 
