@@ -14,6 +14,9 @@ public final class InterfacePatch extends PatchSupport {
         this.rule("resource-manager.interfaces", RESOURCE_MANAGER, "", context ->
             this.addInterface(context.getCurrentClassNode(), FAKE_I_RESOURCE_MANAGER_V1) | this.addInterface(context.getCurrentClassNode(), FAKE_I_RESOURCE_MANAGER_V2));
 
+        this.rule("texture-manager.interfaces", TEXTURE_MANAGER, "", context ->
+            this.addInterface(context.getCurrentClassNode(), FAKE_TEXTURE_MANAGER));
+
         // 1.13.2+
         this.rule("native-image.interface", NATIVE_IMAGE, "[404,]", context ->
             this.addInterface(context.getCurrentClassNode(), FAKE_NATIVE_IMAGE));

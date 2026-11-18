@@ -4,6 +4,7 @@ import java.awt.image.BufferedImage;
 import java.io.InputStream;
 import java.util.Optional;
 
+import net.minecraft.client.renderer.texture.TextureProvider;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.packs.resources.Resource;
 
@@ -14,6 +15,10 @@ public class FakeInterfaceManager {
 
     public static Optional<Resource> IResourceManager_getResource(Object resourceManager, Object location) {
         return ((IFakeIResourceManager.V2) resourceManager).getResource((Identifier) location);
+    }
+
+    public static void TextureManager_registerProvider(Object textureManager, Object textureId, Object texture) {
+        ((IFakeTextureManager) textureManager).registerProvider((Identifier) textureId, (TextureProvider) texture);
     }
 
     public static int NativeImage_getPixel(Object image, int x, int y) {

@@ -19,20 +19,15 @@ public final class RenderPatch extends PatchSupport {
             this.replaceLocalServerCheck(
                 context, context.findMethod(PLAYER_TAB_OVERLAY, "render", "(" + objectDesc(POSE_STACK) + "I" + objectDesc(SCOREBOARD) + objectDesc(OBJECTIVE) + ")V"),
                 MINECRAFT, "isLocalServer"));
-        // 23w16a ~ 26.1-snapshot-11 (1.20 ~ 1.21.11)
-        this.rule("player-tab-overlay.render.v3", PLAYER_TAB_OVERLAY, "[763,774],[0x40000083,0x40000129]", context ->
+        // 23w16a ~ 26.2-snapshot-6 (1.20 ~ 26.1.2)
+        this.rule("player-tab-overlay.extract-render-state.v1", PLAYER_TAB_OVERLAY, "[763,775],[0x40000083,0x40000138]", context ->
             this.replaceLocalServerCheck(
-                context, context.findMethod(PLAYER_TAB_OVERLAY, "render", "(" + objectDesc(GUI_GRAPHICS) + "I" + objectDesc(SCOREBOARD) + objectDesc(OBJECTIVE) + ")V"),
-                MINECRAFT, "isLocalServer"));
-        // 26.1-pre-1 ~ 26.2-snapshot-6 (26.1 ~ 26.1.2)
-        this.rule("player-tab-overlay.extract-render-state.v1", PLAYER_TAB_OVERLAY, "775,[0x4000012A,0x40000138]", context ->
-            this.replaceLocalServerCheck(
-                context, context.findMethod(PLAYER_TAB_OVERLAY, "extractRenderState", "(" + objectDesc(GUI_GRAPHICS_EXTRACTOR) + "I" + objectDesc(SCOREBOARD) + objectDesc(OBJECTIVE) + ")V"),
+                context, context.findMethod(PLAYER_TAB_OVERLAY, "extractContents", "(" + objectDesc(GUI_GRAPHICS_EXTRACTOR) + "I" + objectDesc(SCOREBOARD) + objectDesc(OBJECTIVE) + ")V"),
                 MINECRAFT, "isLocalServer"));
         // 26.2-snapshot-7+ (26.2+)
         this.rule("player-tab-overlay.extract-render-state.v2", PLAYER_TAB_OVERLAY, "[776,800],[804,0x40000000],[0x40000139,]", context ->
             this.replaceLocalServerCheck(
-                context, context.findMethod(PLAYER_TAB_OVERLAY, "extractRenderState", "(" + objectDesc(GUI_GRAPHICS_EXTRACTOR) + "I" + objectDesc(SCOREBOARD) + objectDesc(OBJECTIVE) + ")V"),
+                context, context.findMethod(PLAYER_TAB_OVERLAY, "extractContents", "(" + objectDesc(GUI_GRAPHICS_EXTRACTOR) + "I" + objectDesc(SCOREBOARD) + objectDesc(OBJECTIVE) + ")V"),
                 CLIENT_PACKET_LISTENER, "onlineMode"));
 
         // 19w39a ~ 19w44a

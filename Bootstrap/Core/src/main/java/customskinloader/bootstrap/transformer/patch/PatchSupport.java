@@ -51,7 +51,6 @@ abstract class PatchSupport implements TransformationRuleProvider, Opcodes {
     protected static final String POSE_STACK = "com/mojang/blaze3d/vertex/PoseStack";
 
     protected static final String MINECRAFT = "net/minecraft/client/Minecraft";
-    protected static final String GUI_GRAPHICS = "net/minecraft/client/gui/GuiGraphics";
     protected static final String GUI_GRAPHICS_EXTRACTOR = "net/minecraft/client/gui/GuiGraphicsExtractor";
     protected static final String PLAYER_TAB_OVERLAY = "net/minecraft/client/gui/components/PlayerTabOverlay";
     protected static final String CLIENT_PACKET_LISTENER = "net/minecraft/client/multiplayer/ClientPacketListener";
@@ -90,6 +89,7 @@ abstract class PatchSupport implements TransformationRuleProvider, Opcodes {
     protected static final String FAKE_I_RESOURCE_MANAGER_V1 = "customskinloader/fake/itf/IFakeIResourceManager$V1";
     protected static final String FAKE_I_RESOURCE_MANAGER_V2 = "customskinloader/fake/itf/IFakeIResourceManager$V2";
     protected static final String FAKE_NATIVE_IMAGE = "customskinloader/fake/itf/IFakeNativeImage";
+    protected static final String FAKE_TEXTURE_MANAGER = "customskinloader/fake/itf/IFakeTextureManager";
 
     protected static final String FAKE_SKIN_BUFFER = "customskinloader/fake/FakeSkinBuffer";
     protected static final String FAKE_SKIN_MANAGER = "customskinloader/fake/FakeSkinManager";

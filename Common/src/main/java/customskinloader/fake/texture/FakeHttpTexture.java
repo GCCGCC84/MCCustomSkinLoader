@@ -15,9 +15,10 @@ import customskinloader.fake.FakeMinecraftProfileTexture;
 import customskinloader.fake.FakeSkinBuffer;
 import customskinloader.fake.FakeSkinManager;
 import customskinloader.fake.itf.FakeHttpTextureProcessor;
+import customskinloader.fake.itf.FakeInterfaceManager;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.texture.HttpTexture;
-import net.minecraft.client.renderer.texture.SimpleTexture;
+import net.minecraft.client.renderer.texture.TextureProvider2d;
 import net.minecraft.client.renderer.texture.TextureContents;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.packs.resources.ResourceManager;
@@ -50,34 +51,53 @@ public class FakeHttpTexture {
         }
     }
 
-    public static class V2 extends SimpleTexture {
+    // 24w46a+ (1.21.4+)
+    public static class V2 extends TextureProvider2d {
         private static final String DOMAIN = "customskinloader";
 
         private FakeCapeBuffer buffer;
         private FakeNativeImage image;
 
-        public static Function<NativeImage, CompletableFuture<?>> createTexture(Function<NativeImage, CompletableFuture<?>> function, Identifier location, boolean isSkin) {
+        public static Function<NativeImage, CompletableFuture<?>> createTexture(Function<NativeImage, CompletableFuture<?>> function, boolean isSkin, Identifier location, Function<FakeNativeImage, V2> creator) {
             return isSkin ? _image -> {
                 if (location.toString().startsWith(DOMAIN + ":")) {
                     return CompletableFuture.completedFuture(new AbstractMap.SimpleEntry<>(_image, function.apply(_image)));
                 }
                 return function.apply(_image);
-            } : _image -> function.apply(_image).thenApply(_location -> {
-                Minecraft.getInstance().getTextureManager().registerAndLoad(location, new V2(location, copyImage(new FakeNativeImage(_image))));
-                return _location;
-            });
+            } : _image -> {
+                FakeNativeImage image = copyImage(new FakeNativeImage(_image));
+                return function.apply(_image).thenApply(_location -> {
+                    FakeInterfaceManager.TextureManager_registerProvider(Minecraft.getInstance().getTextureManager(), location, creator.apply(image));
+                    return _location;
+                });
+            };
         }
 
+        // 24w46a ~ 26.4-snapshot-2 (1.21.4 ~ 26.3)
+        public static Function<FakeNativeImage, V2> createLazilyV1(Identifier location) { return image -> new V2(location, image); }
         public V2(Identifier location, FakeNativeImage image) {
             super(location);
             this.buffer = new FakeCapeBuffer();
             this.image = image;
         }
 
+        // 26.4-snapshot-3+ (26.4+)
+        public static Function<FakeNativeImage, V2> createLazilyV2(Identifier location) { return V2::new; }
+        public V2(FakeNativeImage image) {
+            this.buffer = new FakeCapeBuffer();
+            this.image = image;
+        }
+
+        // 24w46a ~ 26.4-snapshot-2 (1.21.4 ~ 26.3)
         @Override
         public TextureContents loadContents(ResourceManager resourceManager) {
             this.image = (FakeNativeImage) this.buffer.parseUserSkin(this.image);
             return new TextureContents(copyImage(this.image).getImage(), null);
+        }
+
+        // 26.4-snapshot-3+ (26.4+)
+        public TextureContents prepareState(ResourceManager resourceManager, Identifier identifier) {
+            return this.loadContents(resourceManager);
         }
 
         /**

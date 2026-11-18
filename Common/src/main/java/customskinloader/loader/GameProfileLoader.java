@@ -5,14 +5,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.mojang.authlib.GameProfile;
 import com.mojang.authlib.minecraft.MinecraftProfileTexture;
-import com.mojang.authlib.properties.Property;
 import com.mojang.authlib.properties.PropertyMap;
 import com.mojang.util.UUIDTypeAdapter;
 import customskinloader.CustomSkinLoader;
@@ -22,7 +20,6 @@ import customskinloader.profile.ModelManager0;
 import customskinloader.profile.UserProfile;
 import customskinloader.utils.TextureUtil;
 import org.apache.commons.codec.binary.Base64;
-import org.apache.commons.lang3.StringUtils;
 
 public class GameProfileLoader implements ICustomSkinLoaderPlugin, ProfileLoader.IProfileLoader {
     @Override
@@ -86,12 +83,8 @@ public class GameProfileLoader implements ICustomSkinLoaderPlugin, ProfileLoader
 
     public static final Gson GSON = new GsonBuilder().registerTypeAdapter(UUID.class, new UUIDTypeAdapter()).registerTypeAdapter(PropertyMap.class, new PropertyMap.Serializer()).create();
     public static Map<MinecraftProfileTexture.Type, MinecraftProfileTexture> getTextures(PropertyMap map) {
-        Property textureProperty = Iterables.getFirst(map.get("textures"), null);
-        if (textureProperty == null) {
-            return Maps.newHashMap();
-        }
-        String value = TextureUtil.AuthlibField.PROPERTY_VALUE.get(textureProperty);
-        if (StringUtils.isBlank(value)) {
+        String value = TextureUtil.getTextureValue(map);
+        if (value == null) {
             return Maps.newHashMap();
         }
         String json = new String(Base64.decodeBase64(value), StandardCharsets.UTF_8);

@@ -4,11 +4,14 @@ import java.io.File;
 import java.lang.reflect.Field;
 import java.util.UUID;
 
+import com.google.common.collect.Iterables;
 import com.mojang.authlib.GameProfile;
 import com.mojang.authlib.properties.Property;
+import com.mojang.authlib.properties.PropertyMap;
 import customskinloader.CustomSkinLoader;
 import org.apache.commons.codec.binary.Base64;
 import org.apache.commons.io.FileUtils;
+import org.apache.commons.lang3.StringUtils;
 
 public class TextureUtil {
     /**
@@ -33,6 +36,18 @@ public class TextureUtil {
             CustomSkinLoader.logger.warning("Error parsing base64 image: " + base64);
             return null;
         }
+    }
+
+    public static String getTextureValue(PropertyMap map) {
+        Property textureProperty = Iterables.getFirst(map.get("textures"), null);
+        if (textureProperty == null) {
+            return null;
+        }
+        String value = TextureUtil.AuthlibField.PROPERTY_VALUE.get(textureProperty);
+        if (StringUtils.isBlank(value)) {
+            return null;
+        }
+        return value;
     }
 
     // Some of the classes in Authlib used after Minecraft 23w31a were changed to record classes,

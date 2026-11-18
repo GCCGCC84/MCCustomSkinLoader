@@ -87,6 +87,12 @@ public class MinecraftUtil {
     }
 
     public static String getCredential(GameProfile profile) {
-        return profile == null ? null : profile.toString();
+        if (profile != null) {
+            Object id = TextureUtil.AuthlibField.GAME_PROFILE_ID.get(profile);
+            Object name = TextureUtil.AuthlibField.GAME_PROFILE_NAME.get(profile);
+            Object propertyValue = TextureUtil.getTextureValue(TextureUtil.AuthlibField.GAME_PROFILE_PROPERTIES.get(profile));
+            return id + "_" + name + "_" + propertyValue;
+        }
+        return null;
     }
 }

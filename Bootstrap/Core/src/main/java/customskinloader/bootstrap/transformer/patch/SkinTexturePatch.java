@@ -17,6 +17,14 @@ public final class SkinTexturePatch extends PatchSupport {
         this.rule("http-texture.uploaded", HTTP_TEXTURE, "[,768],[801,803],[0x40000001,0x400000DD]", context ->
             this.makeFieldPublicNonFinal(context.findField(HTTP_TEXTURE, "uploaded")));
 
+        // 24w46a ~ 26.4-snapshot-2 (1.21.4 ~ 26.3)
+        this.rule("skin-texture-downloader.then-compose.v1", SKIN_TEXTURE_DOWNLOADER, "[769,777],[0x400000DE,0x40000154]", context ->
+            this.injectCreateTextureHook(context, "1"));
+
+        // 26.4-snapshot-3+ (26.4+)
+        this.rule("skin-texture-downloader.then-compose.v2", SKIN_TEXTURE_DOWNLOADER, "[778,800],[804,0x40000000],[0x40000155,]", context ->
+            this.injectCreateTextureHook(context, "2"));
+
         // 19w38a ~ 24w45a (1.15 ~ 1.21.3)
         this.rule("http-texture.process-legacy-skin", HTTP_TEXTURE, "[554,768],[801,803],[0x40000001,0x400000DD]", context -> {
             MethodNode load = context.findMethod(HTTP_TEXTURE, "load", "(" + objectDesc(INPUT_STREAM) + ")" + objectDesc(NATIVE_IMAGE));
@@ -59,49 +67,46 @@ public final class SkinTexturePatch extends PatchSupport {
             return modified;
         });
 
-        // 24w46a+ (1.21.4+)
-        this.rule("skin-texture-downloader.then-compose", SKIN_TEXTURE_DOWNLOADER, "[769,800],[804,0x40000000],[0x400000DE,]", context -> {
-            MethodNode methodNode = context.findMethod(SKIN_TEXTURE_DOWNLOADER, "downloadAndRegisterSkin",
-                "(" + objectDesc(IDENTIFIER) + objectDesc(PATH) + objectDesc(STRING) + "Z)" + objectDesc(COMPLETABLE_FUTURE));
-            if (methodNode == null) {
-                return false;
-            }
-
-            boolean modified = false;
-            int locationLocal = (methodNode.access & ACC_STATIC) == 0 ? 1 : 0;
-            int booleanLocal = locationLocal + 3;
-            String remappedHookDesc = context.remapMethodDescriptor("(" + objectDesc(FUNCTION) + objectDesc(IDENTIFIER) + "Z)" + objectDesc(FUNCTION));
-            for (AbstractInsnNode instruction : methodNode.instructions.toArray()) {
-                if (!(instruction instanceof MethodInsnNode)) {
-                    continue;
-                }
-
-                MethodInsnNode methodInsnNode = (MethodInsnNode) instruction;
-                if (!COMPLETABLE_FUTURE.equals(methodInsnNode.owner) || !"thenCompose".equals(methodInsnNode.name)
-                    || !("(" + objectDesc(FUNCTION) + ")" + objectDesc(COMPLETABLE_FUTURE)).equals(methodInsnNode.desc)) {
-                    continue;
-                }
-
-                InsnList injection = new InsnList();
-                injection.add(new VarInsnNode(ALOAD, locationLocal));
-                injection.add(new VarInsnNode(ILOAD, booleanLocal));
-                injection.add(new MethodInsnNode(INVOKESTATIC, FAKE_HTTP_TEXTURE_V2, "createTexture", remappedHookDesc, false));
-                methodNode.instructions.insertBefore(instruction, injection);
-                modified = true;
-            }
-            return modified;
-        });
-
         // 24w46a ~ 25w37a (1.21.4 ~ 1.21.8)
         this.rule("skin-texture-downloader.process-legacy-skin.v1", SKIN_TEXTURE_DOWNLOADER, "[769,772],[0x400000DE,0x4000010C]", context ->
-            this.replaceSkinTextureDownloaderProcessLegacySkin(
-                context, context.findMethod(SKIN_TEXTURE_DOWNLOADER, "lambda$downloadAndRegisterSkin$0",
-                    "(" + objectDesc(PATH) + objectDesc(STRING) + "Z)" + objectDesc(NATIVE_IMAGE))));
+            this.replaceSkinTextureDownloaderProcessLegacySkin(context, context.findMethod(SKIN_TEXTURE_DOWNLOADER, "lambda$downloadAndRegisterSkin$0", "(" + objectDesc(PATH) + objectDesc(STRING) + "Z)" + objectDesc(NATIVE_IMAGE))));
         // 1.21.9-pre1+ (1.21.9+)
         this.rule("skin-texture-downloader.process-legacy-skin.v2", SKIN_TEXTURE_DOWNLOADER, "[773,800],[804,0x40000000],[0x4000010D,]", context ->
-            this.replaceSkinTextureDownloaderProcessLegacySkin(
-                context, context.findMethod(SKIN_TEXTURE_DOWNLOADER, "lambda$downloadAndRegisterSkin$0",
-                    "(" + objectDesc(PATH) + objectDesc(CLIENT_ASSET_DOWNLOADED_TEXTURE) + "Z)" + objectDesc(NATIVE_IMAGE))));
+            this.replaceSkinTextureDownloaderProcessLegacySkin(context, context.findMethod(SKIN_TEXTURE_DOWNLOADER, "lambda$downloadAndRegisterSkin$0", "(" + objectDesc(PATH) + objectDesc(CLIENT_ASSET_DOWNLOADED_TEXTURE) + "Z)" + objectDesc(NATIVE_IMAGE))));
+    }
+
+    private boolean injectCreateTextureHook(ClassTransformationContext context, String methodVersion) {
+        MethodNode methodNode = context.findMethod(SKIN_TEXTURE_DOWNLOADER, "downloadAndRegisterSkin",
+                "(" + objectDesc(IDENTIFIER) + objectDesc(PATH) + objectDesc(STRING) + "Z)" + objectDesc(COMPLETABLE_FUTURE));
+        if (methodNode == null) {
+            return false;
+        }
+
+        boolean modified = false;
+        int locationLocal = (methodNode.access & ACC_STATIC) == 0 ? 1 : 0;
+        int booleanLocal = locationLocal + 3;
+        String remappedFunctionDesc = context.remapMethodDescriptor("(" + objectDesc(IDENTIFIER) + ")" + objectDesc(FUNCTION));
+        String remappedHookDesc = context.remapMethodDescriptor("(" + objectDesc(FUNCTION) + "Z" + objectDesc(IDENTIFIER) + objectDesc(FUNCTION) + ")" + objectDesc(FUNCTION));
+        for (AbstractInsnNode instruction : methodNode.instructions.toArray()) {
+            if (!(instruction instanceof MethodInsnNode)) {
+                continue;
+            }
+
+            MethodInsnNode methodInsnNode = (MethodInsnNode) instruction;
+            if (!COMPLETABLE_FUTURE.equals(methodInsnNode.owner) || !"thenCompose".equals(methodInsnNode.name) || !("(" + objectDesc(FUNCTION) + ")" + objectDesc(COMPLETABLE_FUTURE)).equals(methodInsnNode.desc)) {
+                continue;
+            }
+
+            InsnList injection = new InsnList();
+            injection.add(new VarInsnNode(ILOAD, booleanLocal));
+            injection.add(new VarInsnNode(ALOAD, locationLocal));
+            injection.add(new InsnNode(DUP));
+            injection.add(new MethodInsnNode(INVOKESTATIC, FAKE_HTTP_TEXTURE_V2, "createLazilyV" + methodVersion, remappedFunctionDesc, false));
+            injection.add(new MethodInsnNode(INVOKESTATIC, FAKE_HTTP_TEXTURE_V2, "createTexture", remappedHookDesc, false));
+            methodNode.instructions.insertBefore(instruction, injection);
+            modified = true;
+        }
+        return modified;
     }
 
     private boolean replaceSkinTextureDownloaderProcessLegacySkin(ClassTransformationContext context, MethodNode methodNode) {
