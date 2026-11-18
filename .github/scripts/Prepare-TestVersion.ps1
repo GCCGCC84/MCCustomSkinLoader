@@ -300,7 +300,7 @@ $InstallerJava = Join-Path $env:JAVA_HOME_25_X64 "bin/java.exe"
 # The DLLs go next to java.exe so every JVM picks them up.
 Write-Step "Setting up Mesa3D"
 New-Item -ItemType Directory -Force -Path $MesaDir | Out-Null
-gh release download --repo pal1000/mesa-dist-win --pattern "mesa3d-*-release-msvc.7z" --dir $MesaDir --clobber
+gh release download --repo pal1000/mesa-dist-win --pattern "mesa3d-*-release-mingw.7z" --dir $MesaDir --clobber
 if ($LASTEXITCODE -ne 0) { throw "Failed to download Mesa3D (exit code $LASTEXITCODE)" }
 $mesaArchive = @(Get-ChildItem -LiteralPath $MesaDir -Filter "*.7z")[-1]
 7z x "$($mesaArchive.FullName)" "-o$(Join-Path $MesaDir 'extracted')" -y | Out-Null
