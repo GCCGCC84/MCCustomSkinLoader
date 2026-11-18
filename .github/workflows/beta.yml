@@ -1,7 +1,7 @@
 name: Beta
 on:
   push:
-    branches: [15-develop]
+    branches: ['**']
 
 permissions:
   contents: write
